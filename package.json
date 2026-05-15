@@ -1,0 +1,17 @@
+{
+  "name": "banco-placeta-secure-api",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "dependencies": {
+    "@vercel/node": "^5.5.0",
+    "mongodb": "^6.20.0"
+  },
+  "devDependencies": {
+    "vercel": "^48.6.0"
+  }
+}
