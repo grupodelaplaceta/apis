@@ -14,7 +14,7 @@ export default async function handler(req, res) {
     }
 
     const config = await readTreasuryConfig();
-    const minSupportedVersionCode = Number(config.minSupportedVersionCode || 1);
+    const minSupportedVersionCode = Number(config.minSupportedVersionCode || 4);
     const updateRequired = versionCode < minSupportedVersionCode;
 
     return json(res, 200, {
