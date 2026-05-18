@@ -2,6 +2,8 @@
 
 API privada para que la app guarde el estado bancario en MongoDB Atlas sin exponer la URI de Mongo en Android.
 
+URL base de produccion: `https://api.banco.laplaceta.org`
+
 ## Deploy en Vercel
 
 1. Crea un proyecto en Vercel apuntando a esta carpeta: `vercel-bank-api`.
@@ -21,12 +23,12 @@ vercel --prod
 
 ## Endpoints
 
-- `GET /api/state`: devuelve el documento de estado.
-- `PUT /api/state`: recibe el estado completo y lo reparte en colecciones Mongo.
-- `GET /api/entity?collection=accounts`: lee una colección concreta.
-- `PUT /api/entity?collection=accounts&id=u-alba`: upsert de una entidad.
-- `DELETE /api/entity?collection=accounts&id=u-alba`: borra una entidad.
-- `GET /api/health`: ping protegido.
+- `GET https://api.banco.laplaceta.org/api/state`: devuelve el documento de estado.
+- `PUT https://api.banco.laplaceta.org/api/state`: recibe el estado completo y lo reparte en colecciones Mongo.
+- `GET https://api.banco.laplaceta.org/api/entity?collection=accounts`: lee una colección concreta.
+- `PUT https://api.banco.laplaceta.org/api/entity?collection=accounts&id=u-alba`: upsert de una entidad.
+- `DELETE https://api.banco.laplaceta.org/api/entity?collection=accounts&id=u-alba`: borra una entidad.
+- `GET https://api.banco.laplaceta.org/api/health`: ping protegido.
 
 Todos los endpoints requieren firma HMAC.
 
