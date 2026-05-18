@@ -13,7 +13,7 @@ URL base de produccion: `https://api.banco.laplaceta.org`
    - `MONGODB_STATE_COLLECTION`
    - `MONGODB_NONCE_COLLECTION`
    - `PLACETA_APP_ID` o `PLACETA_APP_IDS` separado por comas
-   - `PLACETA_APP_SECRET`
+   - `PLACETA_APP_SECRET` o `PLACETA_API_SECRET` (`PLACETA_APP_SECRETS` permite varios separados por comas)
    - `ALLOWED_ORIGINS` opcional, separado por comas
 3. Deploy:
 
@@ -54,7 +54,7 @@ SHA256_HEX_BODY
 Firma:
 
 ```text
-hex(HMAC_SHA256(PLACETA_APP_SECRET, payload))
+hex(HMAC_SHA256(PLACETA_APP_SECRET o PLACETA_API_SECRET, payload))
 ```
 
 El servidor rechaza:
