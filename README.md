@@ -12,7 +12,7 @@ URL base de produccion: `https://api.banco.laplaceta.org`
    - `MONGODB_DB`
    - `MONGODB_STATE_COLLECTION`
    - `MONGODB_NONCE_COLLECTION`
-   - `PLACETA_APP_ID`
+   - `PLACETA_APP_ID` o `PLACETA_APP_IDS` separado por comas
    - `PLACETA_APP_SECRET`
    - `ALLOWED_ORIGINS` opcional, separado por comas
 3. Deploy:
