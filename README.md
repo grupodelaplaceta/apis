@@ -14,6 +14,7 @@ URL base de produccion: `https://api.banco.laplaceta.org`
    - `MONGODB_NONCE_COLLECTION`
    - `PLACETA_APP_ID` o `PLACETA_APP_IDS` separado por comas
    - `PLACETA_APP_SECRET` o `PLACETA_API_SECRET` (`PLACETA_APP_SECRETS` permite varios separados por comas)
+   - `PLACETA_ID_JWT_SECRET` o `JWT_SECRET` con el mismo secreto JWT que PlacetaID para aceptar tokens Bearer de la app movil
    - `ALLOWED_ORIGINS` opcional, separado por comas
 3. Deploy:
 
@@ -30,7 +31,10 @@ vercel --prod
 - `DELETE https://api.banco.laplaceta.org/api/entity?collection=accounts&id=u-alba`: borra una entidad.
 - `GET https://api.banco.laplaceta.org/api/health`: ping protegido.
 
-Todos los endpoints requieren firma HMAC.
+Todos los endpoints requieren una de estas dos autenticaciones:
+
+- Firma HMAC para llamadas servidor-a-servidor.
+- `Authorization: Bearer {tokenSesion}` emitido por PlacetaID para la app movil.
 
 ## Firma requerida
 
@@ -65,6 +69,15 @@ El servidor rechaza:
 - Firma inválida.
 - Body mayor a 20 MB.
 
+## Token PlacetaID para clientes moviles
+
+La app Android no debe compilar `PLACETA_API_SECRET`. En release envia:
+
+- `x-placeta-app-id`
+- `Authorization: Bearer {tokenSesion}`
+
+La API valida el JWT con `PLACETA_ID_JWT_SECRET`, `PLACETA_ID_JWT_SECRETS` o `JWT_SECRET`.
+
 ## Colecciones Mongo usadas
 
 - `bank_meta`
@@ -83,4 +96,4 @@ El servidor rechaza:
 
 ## Nota de seguridad
 
-Una clave embebida en una app Android puede extraerse con ingeniería inversa. Para producción fuerte, añade Play Integrity API: la app pide un token de integridad, el servidor lo valida contra Google y solo acepta firmas desde builds legítimas.
+Una clave embebida en una app Android puede extraerse con ingenieria inversa. La app movil de produccion debe usar Bearer PlacetaID y dejar el secreto HMAC solo para backend/web. Para endurecer aun mas, añade Play Integrity API: la app pide un token de integridad, el servidor lo valida contra Google y solo acepta escrituras desde builds legitimas.
