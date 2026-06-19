@@ -5,7 +5,7 @@ import { readBankState, writeBankState } from "../lib/bankCollections.js";
 export default async function handler(req, res) {
   try {
     const body = req.method === "PUT" ? await readBody(req) : "";
-    await assertRequestAllowed(req, body);
+    await assertRequestAllowed(req, res, body);
 
     if (req.method === "GET") {
       const state = await readBankState();

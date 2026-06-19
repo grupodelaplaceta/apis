@@ -5,7 +5,7 @@ import { readTreasuryConfig } from "../lib/bankCollections.js";
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
-    await assertRequestAllowed(req, await readBody(req));
+    await assertRequestAllowed(req, res, await readBody(req));
 
     const url = new URL(req.url, "https://api.local");
     const versionCode = Number(url.searchParams.get("versionCode") || "0");

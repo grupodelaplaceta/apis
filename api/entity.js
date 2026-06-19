@@ -10,7 +10,7 @@ import {
 export default async function handler(req, res) {
   try {
     const body = req.method === "GET" ? "" : await readBody(req);
-    await assertRequestAllowed(req, body);
+    await assertRequestAllowed(req, res, body);
 
     const url = new URL(req.url, "https://api.local");
     const collection = url.searchParams.get("collection");
