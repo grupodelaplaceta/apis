@@ -16,12 +16,16 @@ export default async function handler(req, res) {
     const config = await readTreasuryConfig();
     const minSupportedVersionCode = Number(config.minSupportedVersionCode || 4);
     const updateRequired = versionCode < minSupportedVersionCode;
+    const maintenanceMode = Boolean(config.maintenanceMode);
 
     return json(res, 200, {
       ok: true,
       updateRequired,
       versionCode,
       minSupportedVersionCode,
+      maintenanceMode,
+      maintenanceMessage: config.maintenanceMessage || "Estamos haciendo mantenimiento. Vuelve a intentarlo en unos minutos.",
+      errorCode: maintenanceMode ? "BPL-MAINT-001" : null,
       source: "vercel"
     });
   } catch (error) {
