@@ -1,5 +1,5 @@
 import { json, readBody } from "../lib/http.js";
-import { readBankState, upsertEntity } from "../lib/bankCollections.js";
+import { readBankState, writeBankState, upsertEntity } from "../lib/bankCollections.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -149,7 +149,84 @@ export default async function handler(req, res) {
         });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip o alta-tributos' });
+      // ── Crear cuenta infantil (Placeta Junior) ───────────────────────
+      if (action === "crear-cuenta-infantil") {
+        const { juniorDip, juniorNombre, tutorAccountId, sendLimitPz, tutorDip } = body;
+        if (!juniorDip || !juniorNombre) return json(res, 400, { error: "Se requiere juniorDip y juniorNombre" });
+
+        const accountId = `u-${juniorDip?.toLowerCase().replace(/-/g, '')}`;
+        const placetaId = `JUNIOR-${juniorDip?.split('-')[1] || '0000'}`;
+        const iban = `CAPI-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+        // Verificar si ya existe
+        const exists = (state.accounts || []).find(a => a.id === accountId);
+        if (exists) return json(res, 200, { accountId, iban: exists.iban || iban, exists: true });
+
+        const newAccount = {
+          _id: accountId, id: accountId,
+          displayName: `Capitália Junior - ${juniorNombre}`,
+          kind: 'CITIZEN', balancePz: 0, placetaId,
+          type: 'Child', parentAccountId: tutorAccountId || 'u-alba',
+          sendLimitPz: sendLimitPz || 50,
+          citizenshipTier: 'JuniorBasica', iban, huchaLocked: false,
+          role: 'Citizen', complianceStatus: 'Clear',
+          fundsJustificationApproved: true, investmentRiskLevel: 1,
+          createdAt: now
+        };
+
+        state.accounts = [...(state.accounts || []), newAccount];
+        await writeBankState(state);
+
+        // Log
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "crear_cuenta_infantil", admin: adminName,
+          accountId, placetaId, juniorDip, tutorAccountId, iban,
+          tipo: "Child", createdAt: now
+        });
+
+        return json(res, 200, { accountId, iban, exists: false });
+      }
+
+      // ── Bono bienvenida Placeta Junior ──────────────────────────────
+      if (action === "bono-bienvenida") {
+        const { juniorAccountId, juniorDip: jDip, tutorDip: tDip } = body;
+        if (!juniorAccountId) return json(res, 400, { error: "Se requiere juniorAccountId" });
+
+        const from = (state.accounts || []).find(a => a.id === 'AGLDP');
+        const to = (state.accounts || []).find(a => a.id === juniorAccountId);
+        if (!from) return json(res, 404, { error: "Cuenta AGLDP no encontrada" });
+        if (!to) return json(res, 404, { error: "Cuenta junior no encontrada" });
+
+        const esDemo = tDip === '11111111D' || (jDip || '').includes('DEMO');
+        const suffix = esDemo ? ' (Demo)' : '';
+        const amountPz = 750;
+
+        if (!esDemo && (from.balancePz || 0) < amountPz) {
+          return json(res, 400, { error: "Saldo insuficiente en AGLDP" });
+        }
+
+        if (!esDemo) {
+          from.balancePz -= amountPz;
+          to.balancePz += amountPz;
+        }
+
+        const txId = uuid();
+        state.transactions = [...(state.transactions || []), {
+          id: txId, kind: 'Gift', fromAccountId: 'AGLDP', toAccountId: juniorAccountId,
+          amountPz, ivaPz: 0, netAmount: amountPz,
+          concept: `Bono Bienvenida Placeta Junior${suffix}`,
+          status: 'Settled', createdAt: now
+        }];
+
+        await writeBankState(state);
+
+        return json(res, 200, {
+          success: true, transactionId: txId,
+          fromBalance: from.balancePz, toBalance: to.balancePz, esDemo
+        });
+      }
+
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil o bono-bienvenida' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
