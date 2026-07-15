@@ -159,10 +159,10 @@ export default async function handler(req, res) {
 
         // IBAN formato oficial app: GDLP-AP{control}-{body}
         const seed = juniorDip?.toUpperCase().replace(/[^A-Z0-9]/g, '') || '0000';
-        let body = 17;
-        for (const ch of seed) body = (body * 31 + ch.charCodeAt(0)) % 1000;
-        const control = ((body * 97) + 13) % 100;
-        const iban = `GDLP-AP${String(control).padStart(2, '0')}-${String(body).padStart(3, '0')}`;
+        let ibanAcc = 17;
+        for (const ch of seed) ibanAcc = (ibanAcc * 31 + ch.charCodeAt(0)) % 1000;
+        const ibanCtrl = ((ibanAcc * 97) + 13) % 100;
+        const iban = `GDLP-AP${String(ibanCtrl).padStart(2, '0')}-${String(ibanAcc).padStart(3, '0')}`;
 
         // Verificar si ya existe
         const exists = (state.accounts || []).find(a => a.id === accountId);
