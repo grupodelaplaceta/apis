@@ -156,7 +156,13 @@ export default async function handler(req, res) {
 
         const accountId = `u-${juniorDip?.toLowerCase().replace(/-/g, '')}`;
         const placetaId = `JUNIOR-${juniorDip?.split('-')[1] || '0000'}`;
-        const iban = `CAPI-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+
+        // IBAN formato oficial app: GDLP-AP{control}-{body}
+        const seed = juniorDip?.toUpperCase().replace(/[^A-Z0-9]/g, '') || '0000';
+        let body = 17;
+        for (const ch of seed) body = (body * 31 + ch.charCodeAt(0)) % 1000;
+        const control = ((body * 97) + 13) % 100;
+        const iban = `GDLP-AP${String(control).padStart(2, '0')}-${String(body).padStart(3, '0')}`;
 
         // Verificar si ya existe
         const exists = (state.accounts || []).find(a => a.id === accountId);
@@ -164,7 +170,7 @@ export default async function handler(req, res) {
 
         const newAccount = {
           _id: accountId, id: accountId,
-          displayName: `Capitália Junior - ${juniorNombre}`,
+          displayName: `Placeta Junior - ${juniorNombre}`,
           kind: 'CITIZEN', balancePz: 0, placetaId,
           type: 'Child', parentAccountId: tutorAccountId || 'u-alba',
           sendLimitPz: sendLimitPz || 50,
