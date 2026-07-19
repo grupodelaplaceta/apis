@@ -87,7 +87,7 @@ export default async function handler(req, res) {
       if (action === "cambiar-tipo") {
         const targetId = accountId || cuentaId;
         if (!targetId || !tipo) return json(res, 400, { error: "Se requiere accountId y tipo" });
-        const validTypes = ["Personal", "Business", "Savings", "Current"];
+        const validTypes = ["Personal", "Business", "Savings", "Current", "Child", "Shared", "Joint"];
         if (!validTypes.includes(tipo)) return json(res, 400, { error: `Tipo inválido. Válidos: ${validTypes.join(", ")}` });
         const c = (state.accounts || []).find(a => a.id === targetId);
         if (!c) return json(res, 404, { error: "Cuenta no encontrada" });
