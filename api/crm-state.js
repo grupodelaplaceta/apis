@@ -232,7 +232,109 @@ export default async function handler(req, res) {
         });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil o bono-bienvenida' });
+      // ── Transferencia real entre cuentas (compras Junior → Capitalia, regalías admin → titular) ──
+      // Body: { action: "transferir", from, to, cantidad, concepto, iva?, juniorDip?, tutorDip? }
+      // - Descuenta `cantidad` de la cuenta origen y abona en destino
+      // - Si iva > 0: Capitalia paga el IVA a TGLP (solo en modo no-demo)
+      // - Deja historial completo en bank_transactions (transacciones reales)
+      // - Modo demo (tutor 11111111D / DIP con DEMO): transacción registrada sin mover saldos
+      if (action === "transferir") {
+        const { from, to, cantidad: amount, concepto, iva, juniorDip, tutorDip } = body;
+        if (!from || !to || !amount || amount <= 0) {
+          return json(res, 400, { error: "Se requiere from, to y cantidad positiva" });
+        }
+        const fromAcc = (state.accounts || []).find(a => a.id === from);
+        const toAcc = (state.accounts || []).find(a => a.id === to);
+        if (!fromAcc) return json(res, 404, { error: `Cuenta origen ${from} no encontrada` });
+        if (!toAcc) return json(res, 404, { error: `Cuenta destino ${to} no encontrada` });
+
+        const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
+        const ivaPz = Number(iva) || 0;
+        const totalDebit = amount + ivaPz;
+        const suffix = esDemo ? ' (Demo)' : '';
+
+        if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
+          return json(res, 400, {
+            error: `Saldo insuficiente en ${from}: tiene ${fromAcc.balancePz}, necesita ${totalDebit}`,
+            fromBalance: fromAcc.balancePz, required: totalDebit
+          });
+        }
+
+        if (!esDemo) {
+          fromAcc.balancePz -= totalDebit;
+          toAcc.balancePz += amount;
+        }
+
+        const txId = uuid();
+        state.transactions = [...(state.transactions || []), {
+          id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
+          amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
+          concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
+          IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
+        }];
+        await upsertEntity("bank_transactions", txId, {
+          id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
+          amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
+          concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
+          IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
+        });
+
+        // IVA: destino (Capitalia) paga el IVA a TGLP
+        if (ivaPz > 0 && !esDemo) {
+          const tglp = (state.accounts || []).find(a => a.id === 'TGLP');
+          if (tglp) {
+            const toAccFull = state.accounts.find(a => a.id === to);
+            if (toAccFull) toAccFull.balancePz -= ivaPz;
+            tglp.balancePz += ivaPz;
+          }
+        }
+
+        await writeBankState(state);
+
+        return json(res, 200, {
+          success: true, transactionId: txId, esDemo,
+          fromBalance: fromAcc.balancePz, toBalance: toAcc.balancePz,
+          ivaPz, netAmount: amount
+        });
+      }
+
+      // ── Regalías: admin paga desde su cuenta a un titular/creador ──
+      // Body: { action: "pagar-regalia", from (cuenta admin), to (cuenta titular), cantidad, concepto }
+      if (action === "pagar-regalia") {
+        const { from, to, cantidad: amount, concepto } = body;
+        if (!from || !to || !amount || amount <= 0) {
+          return json(res, 400, { error: "Se requiere from (cuenta admin), to (cuenta titular) y cantidad positiva" });
+        }
+        const fromAcc = (state.accounts || []).find(a => a.id === from);
+        const toAcc = (state.accounts || []).find(a => a.id === to);
+        if (!fromAcc) return json(res, 404, { error: `Cuenta admin ${from} no encontrada` });
+        if (!toAcc) return json(res, 404, { error: `Cuenta titular ${to} no encontrada` });
+        if ((fromAcc.balancePz || 0) < amount) {
+          return json(res, 400, { error: `Saldo insuficiente en cuenta admin ${from}: tiene ${fromAcc.balancePz}` });
+        }
+
+        fromAcc.balancePz -= amount;
+        toAcc.balancePz += amount;
+
+        const txId = uuid();
+        const tx = {
+          id: txId, kind: 'Royalty', fromAccountId: from, toAccountId: to,
+          amountPz: amount, ivaPz: 0, netAmount: amount, taxAmount: 0,
+          concept: concepto || 'Regalía Placeta Junior', status: 'Settled', createdAt: now,
+          IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
+        };
+        state.transactions = [...(state.transactions || []), tx];
+        await upsertEntity("bank_transactions", txId, tx);
+
+        await writeBankState(state);
+
+        return json(res, 200, {
+          success: true, transactionId: txId,
+          fromBalance: fromAcc.balancePz, toBalance: toAcc.balancePz
+        });
+      }
+
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir o pagar-regalia' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
