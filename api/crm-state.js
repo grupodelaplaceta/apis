@@ -429,7 +429,37 @@ export default async function handler(req, res) {
         return json(res, 200, { success: true, message: "Configuración guardada", config: nuevo });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia o guardar-config' });
+      // ── Responder un ticket de soporte (desde el RSP) ────────────────
+      // Body: { action: "responder-soporte", ticketId, respuesta, admin? }
+      if (action === "responder-soporte") {
+        const { ticketId, respuesta, admin } = body;
+        if (!ticketId || !respuesta) return json(res, 400, { error: "Se requiere ticketId y respuesta" });
+        const ticket = (state.supportTickets || []).find(t => t.id === ticketId);
+        if (!ticket) return json(res, 404, { error: "Ticket no encontrado" });
+        const responses = Array.isArray(ticket.responses) ? ticket.responses : [];
+        responses.push({
+          adminDip: admin || adminName,
+          text: String(respuesta).trim(),
+          createdAt: now
+        });
+        const updated = {
+          ...ticket,
+          responses,
+          status: ticket.status === "Abierto" ? "Respondido" : ticket.status,
+          updatedAt: now
+        };
+        state.supportTickets = (state.supportTickets || []).map(t => t.id === ticketId ? updated : t);
+        await upsertEntity("bank_support_tickets", ticketId, { ...ticket, ...updated, id: ticketId });
+        await writeBankState(state);
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "responder_soporte", admin: adminName,
+          ticketId, ticketSubject: ticket.subject, dip: ticket.dip,
+          createdAt: now
+        });
+        return json(res, 200, { success: true, message: "Respuesta registrada en el ticket", ticket: updated });
+      }
+
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia, guardar-config o responder-soporte' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });

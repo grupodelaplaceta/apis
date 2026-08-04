@@ -81,6 +81,9 @@ export default async function handler(req, res) {
       case 'cerrar-cuenta':
         result = await ejecutarCerrarCuenta(state, data, firmadoPor);
         break;
+      case 'registrar-fondo':
+        result = await ejecutarRegistrarFondo(state, data, firmadoPor);
+        break;
       default:
         return res.status(400).json({ error: `Acción desconocida: ${action}` });
     }
@@ -141,6 +144,24 @@ async function ejecutarCrearCuenta(state, data, firmadoPor) {
   };
 
   state.accounts = [...(state.accounts || []), newAccount];
+
+  // Alta AUTOMÁTICA en Tributos: toda cuenta nueva queda censada.
+  // Empresa → se le genera un EIP; persona física → contribuyente normal.
+  try {
+    const { createContributor } = await import("../lib/tributos.js");
+    await createContributor({
+      placeta_id: placetaId,
+      dip: firmadoPor || placetaId,
+      nombre: displayName || `Cuenta ${tipoCuenta}`,
+      tipo_sujeto: tipoCuenta === 'Business' ? 'Empresa' : 'Fisico',
+      eip: tipoCuenta === 'Business' ? `EIP-${crypto.randomBytes(3).toString('hex').toUpperCase()}` : undefined,
+      iban,
+      roles_json: ['ciudadano']
+    });
+  } catch (e) {
+    console.warn('[CrearCuenta] auto-alta tributos falló:', e.message);
+  }
+
   return { accountId, iban, tipo: tipoCuenta };
 }
 
@@ -196,4 +217,22 @@ async function ejecutarCerrarCuenta(state, data) {
   account.active = false;
 
   return { accountId, status: 'closed' };
+}
+
+async function ejecutarRegistrarFondo(state, data) {
+  const { accountId, riskLevel } = data;
+  const account = state.accounts?.find(a => a.id === accountId);
+  if (!account) throw new Error(`Cuenta ${accountId} no encontrada`);
+  if (account.type !== 'Business') throw new Error('Solo cuentas de empresa pueden ser fondo');
+
+  account.listedInvestmentFund = true;
+  account.investmentRiskLevel = Math.min(7, Math.max(1, Number(riskLevel) || account.investmentRiskLevel || 3));
+  account.fundConditionsSignedAt = new Date().toISOString();
+  account.fundConditionsSignedBy = data.firmadoPor || null;
+  account.fundPolicies = {
+    aceptaCondiciones: true,
+    politicasCancelacion: true
+  };
+
+  return { accountId, listedInvestmentFund: true, riskLevel: account.investmentRiskLevel };
 }

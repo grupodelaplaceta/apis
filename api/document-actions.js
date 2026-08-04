@@ -127,6 +127,8 @@ export default async function handler(req, res) {
         return await solicitarModificacionCuenta(dip, nombre, datos, res);
       case 'solicitar-contrato-producto':
         return await solicitarContratoProducto(dip, nombre, datos, res);
+      case 'solicitar-registro-fondo':
+        return await solicitarRegistroFondo(dip, nombre, datos, res);
       case 'solicitar-bloqueo-cuenta':
         return await solicitarBloqueoCuenta(dip, nombre, datos, res);
       case 'solicitar-baja-cuenta':
@@ -179,6 +181,47 @@ async function solicitarAperturaCuenta(dip, nombre, datos, res) {
     success: true,
     estado: 'pendiente-firma',
     message: 'Solicitud enviada. Revisa PlacetaID Móvil para firmar el documento.',
+    documentoId: docResult.documento?.id,
+    actionId: docResult.actionId
+  });
+}
+
+/**
+ * Solicitar registro de empresa como fondo de inversión (firma de condiciones)
+ */
+async function solicitarRegistroFondo(dip, nombre, datos, res) {
+  const { accountId, riskLevel = 3 } = datos || {};
+
+  const docResult = await solicitarDocumentoAAdmin({
+    tipo: 'contrato-fondo',
+    titulo: 'Alta como fondo de inversión',
+    entidad: 'banco',
+    dipSolicitante: dip,
+    nombreSolicitante: nombre,
+    datos: {
+      accountId,
+      riskLevel,
+      aceptaCondiciones: true,
+      politicasCancelacion: true,
+      fechaSolicitud: new Date().toISOString(),
+      estado: 'pendiente-firma'
+    }
+  });
+
+  if (!docResult) {
+    res.status(503).json({
+      success: true,
+      estado: 'pendiente-admin',
+      message: 'Solicitud registrada. Admin generará el documento.',
+      actionId: `pendiente-${Date.now()}`
+    });
+    return;
+  }
+
+  res.json({
+    success: true,
+    estado: 'pendiente-firma',
+    message: 'Revisa PlacetaID Móvil para firmar el alta como fondo.',
     documentoId: docResult.documento?.id,
     actionId: docResult.actionId
   });
