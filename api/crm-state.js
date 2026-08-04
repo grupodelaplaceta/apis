@@ -1,5 +1,5 @@
 import { json, readBody } from "../lib/http.js";
-import { readBankState, writeBankState, upsertEntity } from "../lib/bankCollections.js";
+import { readBankState, writeBankState, upsertEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -334,7 +334,102 @@ export default async function handler(req, res) {
         });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir o pagar-regalia' });
+      // ── Revertir transferencia (desde el RSP / Supervisión) ──────────
+      // Body: { action: "revertir-transferencia", transactionId, motivo }
+      // Invierte una transferencia ya liquidada: devuelve el principal del
+      // destino al origen y revierte el IVA (TGLP → destino) si procede.
+      // Deja constancia en bank_transactions + auditoría. Sin doble reversión.
+      if (action === "revertir-transferencia") {
+        const { transactionId, motivo } = body;
+        if (!transactionId) return json(res, 400, { error: "Se requiere transactionId" });
+
+        const tx = (state.transactions || []).find(t => t.id === transactionId);
+        if (!tx) return json(res, 404, { error: "Transacción no encontrada" });
+        if (tx.status === "Reversed") return json(res, 400, { error: "La transacción ya fue revertida" });
+        if (tx.kind !== "Transfer") return json(res, 400, { error: "Solo se pueden revertir transferencias" });
+        if (String(tx.concept || "").includes("(Demo)")) return json(res, 400, { error: "Las transacciones de demostración no se revierten" });
+
+        const yaRevertida = (state.transactions || []).some(t =>
+          t.kind === "Reversal" && t.originalTransactionId === transactionId && t.status === "Settled"
+        );
+        if (yaRevertida) return json(res, 400, { error: "La transacción ya fue revertida" });
+
+        const fromAcc = (state.accounts || []).find(a => a.id === tx.fromAccountId);
+        const toAcc = (state.accounts || []).find(a => a.id === tx.toAccountId);
+        if (!fromAcc || !toAcc) return json(res, 404, { error: "Cuenta origen o destino no encontrada" });
+        if ((toAcc.balancePz || 0) < tx.amountPz) {
+          return json(res, 400, { error: `El destino ${toAcc.displayName || tx.toAccountId} no tiene saldo suficiente (${toAcc.balancePz || 0} Pz) para revertir ${tx.amountPz} Pz` });
+        }
+
+        const reversals = [];
+        const revId = uuid();
+        reversals.push({
+          id: revId, kind: "Reversal",
+          fromAccountId: tx.toAccountId, toAccountId: tx.fromAccountId,
+          amountPz: tx.amountPz, ivaPz: 0, netAmount: tx.amountPz, taxAmount: 0,
+          concept: `REVERSIÓN · ${tx.concept || tx.id}`,
+          note: `Reversión de ${tx.id}${motivo ? ` · ${motivo}` : ""}`,
+          status: "Settled", createdAt: now, updatedAt: now,
+          IBAN_Origin: toAcc.iban || "", originalTransactionId: transactionId
+        });
+
+        const ivaPz = Number(tx.ivaPz || tx.taxAmount || 0);
+        if (ivaPz > 0) {
+          const tglp = (state.accounts || []).find(a => a.id === "TGLP");
+          if (tglp && (tglp.balancePz || 0) >= ivaPz) {
+            reversals.push({
+              id: uuid(), kind: "Reversal",
+              fromAccountId: "TGLP", toAccountId: tx.toAccountId,
+              amountPz: ivaPz, ivaPz: 0, netAmount: ivaPz, taxAmount: 0,
+              concept: `REVERSIÓN IVA · ${tx.id}`,
+              note: `Reversión del IVA de ${tx.id}`,
+              status: "Settled", createdAt: now, updatedAt: now,
+              IBAN_Origin: tglp.iban || "", originalTransactionId: transactionId
+            });
+          }
+        }
+
+        state.transactions = [
+          ...(state.transactions || []).map(t => t.id === transactionId ? { ...t, status: "Reversed", updatedAt: now } : t),
+          ...reversals
+        ];
+        for (const rev of reversals) await upsertEntity("bank_transactions", rev.id, rev);
+        await upsertEntity("bank_transactions", transactionId, { ...tx, status: "Reversed", updatedAt: now });
+        await writeBankState(state);
+
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "revertir_transferencia", admin: adminName,
+          transactionId, motivo: motivo || "Reversión administrativa",
+          amountPz: tx.amountPz, fromAccountId: tx.fromAccountId, toAccountId: tx.toAccountId,
+          reversalIds: reversals.map(r => r.id), createdAt: now
+        });
+
+        return json(res, 200, {
+          success: true,
+          message: `Transferencia ${tx.id} revertida (${reversals.length} movimiento${reversals.length === 1 ? "" : "s"})`,
+          transactionId, reversalIds: reversals.map(r => r.id)
+        });
+      }
+
+      // ── Guardar configuración variable del banco (RSP / Supervisión) ──
+      // Body: { action: "guardar-config", config: { rbuAmountPz, comisiones, límites, ... } }
+      // Se FUSIONA con la configuración existente para no pisar campos que la app usa.
+      if (action === "guardar-config") {
+        const { config, motivo } = body;
+        if (!config || typeof config !== "object") return json(res, 400, { error: "Se requiere config" });
+        const actual = (await readTreasuryConfig()) || {};
+        const actualSinId = { ...actual };
+        delete actualSinId._id;
+        const nuevo = { ...actualSinId, ...config };
+        await writeTreasuryConfig(nuevo);
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "guardar_config", admin: adminName,
+          config: { ...config }, motivo: motivo || "Actualización desde RSP", createdAt: now
+        });
+        return json(res, 200, { success: true, message: "Configuración guardada", config: nuevo });
+      }
+
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia o guardar-config' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
