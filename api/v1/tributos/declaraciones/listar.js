@@ -1,7 +1,7 @@
 import { json, methodNotAllowed } from "../../../../lib/http.js";
 import { answerOptions, createCorsHeaders, listDeclarationsForContributor } from "../../../../lib/tributos.js";
 
-const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://admin.laplaceta.org';
+const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://rsp.laplaceta.org';
 const TRIBUTOS_API_KEY = process.env.TRIBUTOS_API_KEY || 'android-tributos-key-2026';
 
 /** Consulta las declaraciones publicadas/aprobadas desde el panel (Supabase) vía gateway. */
@@ -33,6 +33,7 @@ async function fetchPanelDeclarations(placetaId) {
         dias_activos_mes: Number(d.dias_activos_mes || 0),
         estado_pago: d._estado_semantico || d.estado_pago || 'Borrador',
         is_rectified: Boolean(d.is_rectified),
+        pdf_url: d.pdf_url || (d._estado_semantico && /aprob|emit|pag/i.test(d._estado_semantico) ? `${ADMIN_PLACETA_URL}/api/v1/tributos/declaraciones/${d.id}/pdf` : null),
         created_at: d.created_at,
         updated_at: d.updated_at || d.created_at
       }));
