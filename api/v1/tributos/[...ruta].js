@@ -22,8 +22,11 @@ const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://rsp.laplacet
 const TRIBUTOS_API_KEY = process.env.TRIBUTOS_API_KEY || 'android-tributos-key-2026';
 
 function segmentos(req) {
+  // Vercel entrega req.query.ruta como ARRAY para catch-all [...ruta] cuando hay
+  // varios segmentos, pero como STRING cuando hay uno solo. Normalizamos ambos.
   const raw = req.query?.ruta;
-  return Array.isArray(raw) ? raw.map(s => String(s).toLowerCase()) : [];
+  const lista = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []);
+  return lista.map(s => String(s).toLowerCase());
 }
 
 /** Consulta las declaraciones publicadas/aprobadas desde el panel (Supabase) vía gateway. */
