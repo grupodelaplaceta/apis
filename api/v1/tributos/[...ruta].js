@@ -118,6 +118,27 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── GET /subvenciones ─────────────────────────────────────────────
+    // Subvenciones entre empresas del RSP: proxy a rsp.laplaceta.org para
+    // que la app del banco consulte las subvenciones de una empresa por EIP.
+    if (first === 'subvenciones') {
+      if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
+      const url = new URL(req.url, 'https://api.local');
+      const eip = url.searchParams.get('eip') || url.searchParams.get('EIP') || '';
+      if (!eip) return json(res, 400, { error: 'eip_requerido' });
+      try {
+        const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/subvenciones?eip=${encodeURIComponent(eip)}`, {
+          headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' },
+          signal: AbortSignal.timeout(9000)
+        });
+        const body = await r.json();
+        if (!r.ok) return json(res, r.status, { error: body?.error || 'rsp_subvenciones_error' });
+        return json(res, 200, body);
+      } catch (e) {
+        return json(res, 502, { error: 'rsp_subvenciones_no_disponible: ' + e.message });
+      }
+    }
+
     // ── GET /declaraciones/listar ─────────────────────────────────────
     if (first === 'declaraciones' && seg[1] === 'listar') {
       if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
