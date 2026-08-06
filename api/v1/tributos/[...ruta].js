@@ -26,7 +26,16 @@ function segmentos(req) {
   // varios segmentos, pero como STRING cuando hay uno solo. Normalizamos ambos.
   const raw = req.query?.ruta;
   const lista = Array.isArray(raw) ? raw : (typeof raw === 'string' ? [raw] : []);
-  return lista.map(s => String(s).toLowerCase());
+  if (lista.length) return lista.map(s => String(s).toLowerCase());
+  // Fallback robusto: extraer los segmentos de la URL real
+  // (/api/v1/tributos/contribuyentes → ['contribuyentes']) sin depender de cómo
+  // el framework de Vercel expone los parámetros de la ruta catch-all.
+  try {
+    const url = new URL(req.url, 'https://api.local');
+    const parts = url.pathname.split('/').filter(Boolean);
+    const idx = parts.indexOf('tributos');
+    return idx >= 0 ? parts.slice(idx + 1).map(s => String(s).toLowerCase()) : [];
+  } catch { return []; }
 }
 
 /** Consulta las declaraciones publicadas/aprobadas desde el panel (Supabase) vía gateway. */
