@@ -118,6 +118,28 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── GET /estimado-impuestos ──────────────────────────────────────
+    // Estimado de impuestos (IRM + IGF + tipo + exención IVA) calculado SIEMPRE
+    // en el backend (RSP), nunca en el APK. La app solo muestra el resultado.
+    if (first === 'estimado-impuestos') {
+      if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
+      const url = new URL(req.url, 'https://api.local');
+      const placetaId = url.searchParams.get('placeta_id') || url.searchParams.get('placetaId') || url.searchParams.get('dip') || '';
+      if (!placetaId) return json(res, 400, { error: 'placeta_id_requerido' });
+      const mesPeriodo = url.searchParams.get('mes_periodo') || new Date().toISOString().slice(0, 7);
+      try {
+        const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/estimado-impuestos?placeta_id=${encodeURIComponent(placetaId)}&mes_periodo=${encodeURIComponent(mesPeriodo)}`, {
+          headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' },
+          signal: AbortSignal.timeout(9000)
+        });
+        const body = await r.json();
+        if (!r.ok) return json(res, r.status, { error: body?.error || 'rsp_estimado_error' });
+        return json(res, 200, body);
+      } catch (e) {
+        return json(res, 502, { error: 'rsp_estimado_no_disponible: ' + e.message });
+      }
+    }
+
     // ── GET /subvenciones ─────────────────────────────────────────────
     // Subvenciones entre empresas del RSP: proxy a rsp.laplaceta.org para
     // que la app del banco consulte las subvenciones de una empresa por EIP.
