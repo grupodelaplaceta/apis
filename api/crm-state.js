@@ -299,9 +299,12 @@ export default async function handler(req, res) {
       }
 
       // ── Regalías: admin paga desde su cuenta a un titular/creador ──
-      // Body: { action: "pagar-regalia", from (cuenta admin), to (cuenta titular), cantidad, concepto }
+      // Body: { action: "pagar-regalia", from (cuenta admin), to (cuenta titular), cantidad, concepto, kind? }
+      // Art. 6 CNI: se puede pasar kind "PLJUNIOR_PAYMENT" para los pagos de
+      // recompensas y juegos de Capitalia en nombre de PLACETA JUNIOR (categoría
+      // propia, sujeta a IVA/IRM/IGF, no incluye RBU extraordinarios).
       if (action === "pagar-regalia") {
-        const { from, to, cantidad: amount, concepto } = body;
+        const { from, to, cantidad: amount, concepto, kind } = body;
         if (!from || !to || !amount || amount <= 0) {
           return json(res, 400, { error: "Se requiere from (cuenta admin), to (cuenta titular) y cantidad positiva" });
         }
@@ -313,12 +316,13 @@ export default async function handler(req, res) {
           return json(res, 400, { error: `Saldo insuficiente en cuenta admin ${from}: tiene ${fromAcc.balancePz}` });
         }
 
+        const finalKind = kind === "PLJUNIOR_PAYMENT" ? "PLJUNIOR_PAYMENT" : "Royalty";
         fromAcc.balancePz -= amount;
         toAcc.balancePz += amount;
 
         const txId = uuid();
         const tx = {
-          id: txId, kind: 'Royalty', fromAccountId: from, toAccountId: to,
+          id: txId, kind: finalKind, fromAccountId: from, toAccountId: to,
           amountPz: amount, ivaPz: 0, netAmount: amount, taxAmount: 0,
           concept: concepto || 'Regalía Placeta Junior', status: 'Settled', createdAt: now,
           IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
