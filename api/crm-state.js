@@ -1,5 +1,5 @@
 import { json, readBody } from "../lib/http.js";
-import { readBankState, writeBankState, upsertEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
+import { readBankState, writeBankState, upsertEntity, deleteEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
     if (req.method === "POST") {
       if (!requireCrmKey(req, res)) return;
       const body = JSON.parse(await readBody(req) || "{}");
-      const { action, cantidad, dip, cuentaId, motivo, accountId, tipo, eip, placetaId, displayName } = body;
+      const { action, cantidad, dip, cuentaId, motivo, accountId, tipo, eip, placetaId, displayName, borrarTransacciones } = body;
       const state = await readBankState();
       const now = new Date().toISOString();
       const adminName = (state.users || []).find(u => u.role === "admin")?.displayName || "CRM Admin";
@@ -459,7 +459,40 @@ export default async function handler(req, res) {
         return json(res, 200, { success: true, message: "Respuesta registrada en el ticket", ticket: updated });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia, guardar-config o responder-soporte' });
+      // ── Borrar cuenta (demo/junior inválidos) ─────────────────────────
+      // Body: { action: "borrar-cuenta", accountId, motivo, borrarTransacciones?: true }
+      if (action === "borrar-cuenta") {
+        const targetId = accountId || cuentaId;
+        if (!targetId) return json(res, 400, { error: "Se requiere accountId" });
+        const c = (state.accounts || []).find(a => a.id === targetId);
+        if (!c) return json(res, 404, { error: "Cuenta no encontrada" });
+
+        // Borrar la cuenta
+        await deleteEntity("bank_accounts", targetId);
+
+        // Borrar transacciones asociadas si se solicita (o si saldo es 0 y es demo)
+        const borrarTx = borrarTransacciones === true;
+        if (borrarTx) {
+          const txs = (state.transactions || []).filter(t => t.fromAccountId === targetId || t.toAccountId === targetId);
+          for (const tx of txs) {
+            await deleteEntity("bank_transactions", tx.id);
+          }
+        }
+
+        // Audit log
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "borrar_cuenta", admin: adminName,
+          accountId: targetId, displayName: c.displayName,
+          tipo: c.type, motivo: motivo || "Limpieza de cuentas demo/junior inválidas",
+          borroTransacciones: borrarTx, createdAt: now
+        });
+        return json(res, 200, {
+          message: `Cuenta ${c.displayName || targetId} eliminada`,
+          accountId: targetId, auditLogId: logId, borroTransacciones: borrarTx
+        });
+      }
+
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia, guardar-config, responder-soporte o borrar-cuenta' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
