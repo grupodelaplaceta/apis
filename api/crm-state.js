@@ -298,6 +298,76 @@ export default async function handler(req, res) {
         });
       }
 
+      // ── Transferencias MASIVAS (lote) ──────────────────────────────────
+      // Body: { action: "transferir-masivo", transferencias: [{ from, to, cantidad, concepto, iva?, juniorDip?, tutorDip? }] }
+      // Procesa todo el lote con UNA sola lectura y UNA sola escritura del
+      // estado del banco. Evita que cada transferencia haga una lectura +
+      // escritura completa del estado (el banco tarda mucho cuando se guardan
+      // muchas transferencias a la vez). Devuelve un resultado por item.
+      if (action === "transferir-masivo") {
+        const lista = Array.isArray(body.transferencias) ? body.transferencias : [];
+        if (!lista.length) return json(res, 400, { error: "Se requiere transferencias[] con al menos una transferencia" });
+        if (lista.length > 500) return json(res, 400, { error: "Máximo 500 transferencias por lote" });
+
+        const resultados = [];
+        const nuevasTx = [];
+        const directos = [];
+        const accountMap = new Map((state.accounts || []).map(a => [a.id, a]));
+
+        for (const item of lista) {
+          const { from, to, cantidad: amount, concepto, iva, juniorDip, tutorDip } = item || {};
+          if (!from || !to || !amount || Number(amount) <= 0) {
+            resultados.push({ from, to, cantidad: amount, success: false, error: "from, to y cantidad positiva requeridos" });
+            continue;
+          }
+          const fromAcc = accountMap.get(from);
+          const toAcc = accountMap.get(to);
+          if (!fromAcc) { resultados.push({ from, to, cantidad: amount, success: false, error: `Cuenta origen ${from} no encontrada` }); continue; }
+          if (!toAcc) { resultados.push({ from, to, cantidad: amount, success: false, error: `Cuenta destino ${to} no encontrada` }); continue; }
+
+          const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
+          const ivaPz = Number(iva) || 0;
+          const totalDebit = amount + ivaPz;
+          const suffix = esDemo ? ' (Demo)' : '';
+
+          if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
+            resultados.push({ from, to, cantidad: amount, success: false, error: `Saldo insuficiente en ${from}: tiene ${fromAcc.balancePz}, necesita ${totalDebit}` });
+            continue;
+          }
+
+          if (!esDemo) {
+            fromAcc.balancePz -= totalDebit;
+            toAcc.balancePz += amount;
+          }
+
+          const txId = uuid();
+          const tx = {
+            id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
+            amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
+            concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
+            IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
+          };
+          nuevasTx.push(tx);
+          directos.push({ txId, tx });
+          resultados.push({ from, to, cantidad: amount, concepto: concepto || null, iva: ivaPz, transactionId: txId, success: true, esDemo });
+        }
+
+        if (nuevasTx.length) {
+          // Persistir cada transacción (paralelo) además del estado, igual que el flujo simple
+          await Promise.all(directos.map(({ txId, tx }) => upsertEntity("bank_transactions", txId, tx)));
+          state.transactions = [...(state.transactions || []), ...nuevasTx];
+          // UNA única escritura del estado para todo el lote
+          await writeBankState(state);
+        }
+
+        const ok = resultados.filter(r => r.success).length;
+        return json(res, 200, {
+          success: ok > 0,
+          total: lista.length, ok, errores: resultados.length - ok,
+          resultados
+        });
+      }
+
       // ── Regalías: admin paga desde su cuenta a un titular/creador ──
       // Body: { action: "pagar-regalia", from (cuenta admin), to (cuenta titular), cantidad, concepto, kind? }
       // Art. 6 CNI: se puede pasar kind "PLJUNIOR_PAYMENT" para los pagos de
