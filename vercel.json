@@ -4,6 +4,9 @@
       "maxDuration": 10
     }
   },
+  "rewrites": [
+    { "source": "/api/web/:path*", "destination": "/api/web" }
+  ],
   "headers": [
     {
       "source": "/api/(.*)",
