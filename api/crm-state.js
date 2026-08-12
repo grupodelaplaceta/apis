@@ -145,8 +145,7 @@ export default async function handler(req, res) {
         const placetaFinal = String(c.placetaId || dipFinal);
         const existente = (state.users || []).find(u => u.placetaId === placetaFinal || u.dip === dipFinal);
         const usuario = existente || {
-          id: `u-${dipFinal.toLowerCase()}`,
-          _id: `u-${dipFinal.toLowerCase()}`,
+          // Convención bank_users: _id en Mongo = DIP (clave de upsert). Sin campos id/_id propios.
           dip: dipFinal,
           placetaId: placetaFinal,
           displayName: c.displayName || c.nombre || c.titularNombre || dipFinal,
