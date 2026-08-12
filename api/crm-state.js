@@ -144,16 +144,18 @@ export default async function handler(req, res) {
         }
         const placetaFinal = String(c.placetaId || dipFinal);
         const existente = (state.users || []).find(u => u.placetaId === placetaFinal || u.dip === dipFinal);
-        const usuario = existente || {
-          // Convención bank_users: _id en Mongo = DIP (clave de upsert). Sin campos id/_id propios.
-          dip: dipFinal,
-          placetaId: placetaFinal,
-          displayName: c.displayName || c.nombre || c.titularNombre || dipFinal,
-          role: "member",
-          eip: c.eip || null,
-          verified: true,
-          createdAt: now,
-        };
+        const usuario = existente
+          ? { ...existente, dip: dipFinal, placetaId: placetaFinal } // normaliza si había mismatch (p.ej. PLID-... vs DNI)
+          : {
+              // Convención bank_users: _id en Mongo = DIP (clave de upsert). Sin campos id/_id propios.
+              dip: dipFinal,
+              placetaId: placetaFinal,
+              displayName: c.displayName || c.nombre || c.titularNombre || dipFinal,
+              role: "member",
+              eip: c.eip || null,
+              verified: true,
+              createdAt: now,
+            };
         await upsertEntity("bank_users", usuario.dip || usuario.placetaId, { ...usuario, updatedAt: now });
         await upsertEntity("bank_audit_logs", logId, {
           id: logId, action: "crear_usuario", admin: adminName,
