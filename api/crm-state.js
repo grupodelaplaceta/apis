@@ -6,6 +6,11 @@ const CRM_KEY = process.env.CRM_READ_KEY || '';
 
 function uuid() { return crypto.randomUUID(); }
 
+async function writeAndReadState(state) {
+  await writeBankState(state);
+  return readBankState();
+}
+
 function requireCrmKey(req, res) {
   const key = req.headers["x-crm-key"];
   if (!CRM_KEY || key !== CRM_KEY) {
@@ -211,11 +216,6 @@ export default async function handler(req, res) {
           return json(res, 400, { error: "Saldo insuficiente en AGLDP" });
         }
 
-        if (!esDemo) {
-          from.balancePz -= amountPz;
-          to.balancePz += amountPz;
-        }
-
         const txId = uuid();
         state.transactions = [...(state.transactions || []), {
           id: txId, kind: 'Gift', fromAccountId: 'AGLDP', toAccountId: juniorAccountId,
@@ -224,11 +224,13 @@ export default async function handler(req, res) {
           status: 'Settled', createdAt: now
         }];
 
-        await writeBankState(state);
+        const confirmed = esDemo ? state : await writeAndReadState(state);
+        const confirmedFrom = (confirmed.accounts || []).find(a => a.id === 'AGLDP') || from;
+        const confirmedTo = (confirmed.accounts || []).find(a => a.id === juniorAccountId) || to;
 
         return json(res, 200, {
           success: true, transactionId: txId,
-          fromBalance: from.balancePz, toBalance: to.balancePz, esDemo
+          fromBalance: confirmedFrom.balancePz, toBalance: confirmedTo.balancePz, esDemo
         });
       }
 
@@ -250,7 +252,7 @@ export default async function handler(req, res) {
 
         const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
         const ivaPz = Number(iva) || 0;
-        const totalDebit = amount + ivaPz;
+        const totalDebit = Number(amount);
         const suffix = esDemo ? ' (Demo)' : '';
 
         if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
@@ -260,40 +262,33 @@ export default async function handler(req, res) {
           });
         }
 
-        if (!esDemo) {
-          fromAcc.balancePz -= totalDebit;
-          toAcc.balancePz += amount;
-        }
-
         const txId = uuid();
-        state.transactions = [...(state.transactions || []), {
+        const tx = {
           id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
-          amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
+          amountPz: Number(amount), ivaPz: ivaPz, netAmount: Number(amount), taxAmount: ivaPz,
           concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
           IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
-        }];
-        await upsertEntity("bank_transactions", txId, {
-          id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
-          amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
-          concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
-          IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
-        });
+        };
+        const newTransactions = [tx];
 
         // IVA: destino (Capitalia) paga el IVA a TGLP
         if (ivaPz > 0 && !esDemo) {
-          const tglp = (state.accounts || []).find(a => a.id === 'TGLP');
-          if (tglp) {
-            const toAccFull = state.accounts.find(a => a.id === to);
-            if (toAccFull) toAccFull.balancePz -= ivaPz;
-            tglp.balancePz += ivaPz;
-          }
+          newTransactions.push({
+            id: uuid(), kind: 'Tax', fromAccountId: to, toAccountId: 'TGLP',
+            amountPz: ivaPz, ivaPz: 0, netAmount: ivaPz, taxAmount: 0,
+            concept: `IVA · ${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
+            IBAN_Origin: toAcc.iban || '', originalTransactionId: txId
+          });
         }
 
-        await writeBankState(state);
+        state.transactions = [...(state.transactions || []), ...newTransactions];
+        const confirmed = esDemo ? state : await writeAndReadState(state);
+        const confirmedFrom = (confirmed.accounts || []).find(a => a.id === from) || fromAcc;
+        const confirmedTo = (confirmed.accounts || []).find(a => a.id === to) || toAcc;
 
         return json(res, 200, {
           success: true, transactionId: txId, esDemo,
-          fromBalance: fromAcc.balancePz, toBalance: toAcc.balancePz,
+          fromBalance: confirmedFrom.balancePz, toBalance: confirmedTo.balancePz,
           ivaPz, netAmount: amount
         });
       }
@@ -311,7 +306,6 @@ export default async function handler(req, res) {
 
         const resultados = [];
         const nuevasTx = [];
-        const directos = [];
         const accountMap = new Map((state.accounts || []).map(a => [a.id, a]));
 
         for (const item of lista) {
@@ -327,7 +321,7 @@ export default async function handler(req, res) {
 
           const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
           const ivaPz = Number(iva) || 0;
-          const totalDebit = amount + ivaPz;
+          const totalDebit = Number(amount);
           const suffix = esDemo ? ' (Demo)' : '';
 
           if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
@@ -335,26 +329,26 @@ export default async function handler(req, res) {
             continue;
           }
 
-          if (!esDemo) {
-            fromAcc.balancePz -= totalDebit;
-            toAcc.balancePz += amount;
-          }
-
           const txId = uuid();
           const tx = {
             id: txId, kind: 'Transfer', fromAccountId: from, toAccountId: to,
-            amountPz: amount, ivaPz, netAmount: amount, taxAmount: ivaPz,
+            amountPz: Number(amount), ivaPz: ivaPz, netAmount: Number(amount), taxAmount: ivaPz,
             concept: `${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
             IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
           };
           nuevasTx.push(tx);
-          directos.push({ txId, tx });
+          if (ivaPz > 0 && !esDemo) {
+            nuevasTx.push({
+              id: uuid(), kind: 'Tax', fromAccountId: to, toAccountId: 'TGLP',
+              amountPz: ivaPz, ivaPz: 0, netAmount: ivaPz, taxAmount: 0,
+              concept: `IVA · ${concepto || 'Transferencia'}${suffix}`, status: 'Settled', createdAt: now,
+              IBAN_Origin: toAcc.iban || '', originalTransactionId: txId
+            });
+          }
           resultados.push({ from, to, cantidad: amount, concepto: concepto || null, iva: ivaPz, transactionId: txId, success: true, esDemo });
         }
 
         if (nuevasTx.length) {
-          // Persistir cada transacción (paralelo) además del estado, igual que el flujo simple
-          await Promise.all(directos.map(({ txId, tx }) => upsertEntity("bank_transactions", txId, tx)));
           state.transactions = [...(state.transactions || []), ...nuevasTx];
           // UNA única escritura del estado para todo el lote
           await writeBankState(state);
@@ -387,9 +381,6 @@ export default async function handler(req, res) {
         }
 
         const finalKind = kind === "PLJUNIOR_PAYMENT" ? "PLJUNIOR_PAYMENT" : "Royalty";
-        fromAcc.balancePz -= amount;
-        toAcc.balancePz += amount;
-
         const txId = uuid();
         const tx = {
           id: txId, kind: finalKind, fromAccountId: from, toAccountId: to,
@@ -398,13 +389,103 @@ export default async function handler(req, res) {
           IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
         };
         state.transactions = [...(state.transactions || []), tx];
-        await upsertEntity("bank_transactions", txId, tx);
-
-        await writeBankState(state);
+        const confirmed = await writeAndReadState(state);
+        const confirmedFrom = (confirmed.accounts || []).find(a => a.id === from) || fromAcc;
+        const confirmedTo = (confirmed.accounts || []).find(a => a.id === to) || toAcc;
 
         return json(res, 200, {
           success: true, transactionId: txId,
-          fromBalance: fromAcc.balancePz, toBalance: toAcc.balancePz
+          fromBalance: confirmedFrom.balancePz, toBalance: confirmedTo.balancePz
+        });
+      }
+
+      // ── Asegurar Fondo de Apoyo (FUND-BLP) ───────────────────────────
+      // Body: { action: "crear-fondo-apoyo", importeInicial? } (idempotente)
+      // Cuenta de tesorería que financia las retribuciones de 250 Pz/mes de
+      // propietarios sin remuneración (Fiscalidad Ampliada / RSP).
+      if (action === "crear-fondo-apoyo") {
+        const importeInicial = Number(body.importeInicial) || 0;
+        let fondo = (state.accounts || []).find(a => a.id === "FUND-BLP" || a.kind === "FONDO_APOYO");
+        if (!fondo) {
+          const fondoId = "FUND-BLP";
+          fondo = {
+            _id: fondoId, id: fondoId, kind: "FONDO_APOYO", role: "Tributos",
+            displayName: "Fondo de Apoyo a la Participación Económica y Social (Fundación)",
+            type: "State", balancePz: importeInicial, iban: "GDLP-AP71-601",
+            placetaId: "FUND-BLP", createdAt: now, updatedAt: now
+          };
+          state.accounts = [...(state.accounts || []), fondo];
+        } else if (importeInicial > 0 && !(fondo.balancePz > 0)) {
+          fondo = { ...fondo, balancePz: (fondo.balancePz || 0) + importeInicial, updatedAt: now };
+          state.accounts = (state.accounts || []).map(a => a.id === fondo.id ? fondo : a);
+        }
+        await writeBankState(state);
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "crear_fondo_apoyo", admin: adminName,
+          importeInicial, saldo: fondo.balancePz, motivo: motivo || "Alta del Fondo de Apoyo (RSP)", createdAt: now
+        });
+        return json(res, 200, { success: true, message: "Fondo de Apoyo (FUND-BLP) asegurado", accountId: "FUND-BLP", balancePz: fondo.balancePz });
+      }
+
+      // ── Retribuir: pago de retribución 250 Pz desde el Fondo de Apoyo ──
+      // Body: { action: "retribuir", dip (beneficiario), retribucionId (RET-...),
+      //         cuantia, mes (YYYY-MM), entidadEip, entidadNombre, concepto? }
+      // Flujo real: FUND-BLP → cuenta del beneficiario, kind 'Retribucion',
+      // con referencia a la retribución RSP y auditoría. Sin IVA (no es venta).
+      if (action === "retribuir") {
+        const { dip, retribucionId, cuantia, mes, entidadEip, entidadNombre, concepto } = body;
+        const importe = Number(cuantia) || 0;
+        if (!dip) return json(res, 400, { error: "Se requiere el DIP del beneficiario" });
+        if (importe <= 0) return json(res, 400, { error: "Se requiere una cuantía positiva" });
+
+        const destino = (state.users || []).find(u => u.dip?.toUpperCase() === String(dip).toUpperCase());
+        if (!destino) return json(res, 404, { error: "Beneficiario (DIP) no encontrado" });
+        const cd = (state.accounts || []).find(a => a.placetaId === destino.placetaId) ||
+                   (state.accounts || []).find(a => a.id === `u-${String(dip).toLowerCase().replace(/[^a-z0-9]/g, '')}`) ||
+                   (state.accounts || []).find(a => a.type !== "State" && a.placetaId === destino.placetaId);
+
+        let fondo = (state.accounts || []).find(a => a.id === "FUND-BLP" || a.kind === "FONDO_APOYO");
+        if (!fondo) {
+          const fondoId = "FUND-BLP";
+          fondo = { _id: fondoId, id: fondoId, kind: "FONDO_APOYO", role: "Tributos", displayName: "Fondo de Apoyo a la Participación Económica y Social (Fundación)", type: "State", balancePz: 0, iban: "GDLP-AP71-601", placetaId: "FUND-BLP", createdAt: now, updatedAt: now };
+          state.accounts = [...(state.accounts || []), fondo];
+        }
+        if (!cd) return json(res, 404, { error: "El beneficiario no tiene cuenta bancaria" });
+
+        const esDemo = String(dip).includes("DEMO") || cd.id.includes("DEMO");
+        const suffix = esDemo ? " (Demo)" : "";
+
+        if (!esDemo && (fondo.balancePz || 0) < importe) {
+          return json(res, 400, { error: `Saldo insuficiente en el Fondo de Apoyo: tiene ${fondo.balancePz} Pz, necesita ${importe} Pz` });
+        }
+
+        const txId = uuid();
+        const conceptoTx = `Retribución ${mes || ''} · ${retribucionId || 'RET'} · ${entidadNombre || entidadEip || ''}`.trim() + suffix;
+        const tx = {
+          id: txId, kind: "Retribucion", fromAccountId: "FUND-BLP", toAccountId: cd.id,
+          amountPz: importe, ivaPz: 0, netAmount: importe, taxAmount: 0,
+          concept: conceptoTx, note: `Retribución propietario sin remuneración (Fiscalidad Ampliada). Ref RSP: ${retribucionId || '-'}`,
+          status: "Settled", createdAt: now, updatedAt: now,
+          IBAN_Origin: fondo.iban || "", originalTransactionId: null,
+          retribucionId: retribucionId || null, mes: mes || null, dip: destino.dip
+        };
+        state.transactions = [...(state.transactions || []), tx];
+        const confirmed = esDemo ? state : await writeAndReadState(state);
+        const confirmedFondo = (confirmed.accounts || []).find(a => a.id === "FUND-BLP") || fondo;
+        const confirmedTo = (confirmed.accounts || []).find(a => a.id === cd.id) || cd;
+
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "retribuir", admin: adminName,
+          dip: destino.dip, placetaId: cd.placetaId, retribucionId: retribucionId || null,
+          cuantia: importe, mes: mes || null, entidadEip: entidadEip || null,
+          fromAccountId: "FUND-BLP", toAccountId: cd.id, transactionId: txId,
+          motivo: concepto || "Retribución propietario sin remuneración", createdAt: now
+        });
+
+        return json(res, 200, {
+          success: true, transactionId: txId, esDemo,
+          message: `Retribución de ${importe} Pz pagada a ${destino.displayName || destino.dip} desde el Fondo de Apoyo`,
+          fromBalance: confirmedFondo.balancePz, toBalance: confirmedTo.balancePz
         });
       }
 
@@ -566,7 +647,7 @@ export default async function handler(req, res) {
         });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, pagar-regalia, revertir-transferencia, guardar-config, responder-soporte o borrar-cuenta' });
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, transferir-masivo, pagar-regalia, revertir-transferencia, retribuir, crear-fondo-apoyo, guardar-config, responder-soporte o borrar-cuenta' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
