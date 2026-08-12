@@ -127,6 +127,48 @@ export default async function handler(req, res) {
         return json(res, 200, { message: `EIP ${nuevoEip} asignado a ${c.displayName || c.id}`, eip: nuevoEip, auditLogId: logId });
       }
 
+      // ── Crear usuario bancario (alta de bank_user desde una cuenta) ──
+      // Crea el bank_users para un titular con cuenta pero sin usuario,
+      // de modo que pueda ser censado en Tributos (alta-tributos) y login.
+      // Normaliza el placetaId (permite cuentas con placetaId sin prefijo PLID-).
+      if (action === "crear-usuario") {
+        const targetId = accountId || cuentaId;
+        let c = (state.accounts || []).find(a => a.id === targetId);
+        if (!c && placetaId) c = (state.accounts || []).find(a => a.placetaId === placetaId || a.dip === placetaId);
+        if (!c && dip) c = (state.accounts || []).find(a => a.placetaId === dip || a.dip === dip);
+        if (!c) return json(res, 404, { error: "Cuenta no encontrada. Especifica accountId, placetaId o dip" });
+        const dipFinal = String(c.dip || c.placetaId || dip || "").trim().toUpperCase();
+        if (!dipFinal) return json(res, 400, { error: "La cuenta no tiene placetaId ni dip" });
+        if (!/^(\d{8}[A-Z]|[XYZ]\d{7,8}[A-Z])$/.test(dipFinal)) {
+          return json(res, 400, { error: `DIP inválido para alta de usuario: ${dipFinal} (debe ser DNI/NIE)` });
+        }
+        const placetaFinal = String(c.placetaId || dipFinal);
+        const existente = (state.users || []).find(u => u.placetaId === placetaFinal || u.dip === dipFinal);
+        const usuario = existente || {
+          id: `u-${dipFinal.toLowerCase()}`,
+          _id: `u-${dipFinal.toLowerCase()}`,
+          dip: dipFinal,
+          placetaId: placetaFinal,
+          displayName: c.displayName || c.nombre || c.titularNombre || dipFinal,
+          role: "member",
+          eip: c.eip || null,
+          verified: true,
+          createdAt: now,
+        };
+        await upsertEntity("bank_users", usuario.dip || usuario.placetaId, { ...usuario, updatedAt: now });
+        await upsertEntity("bank_audit_logs", logId, {
+          id: logId, action: "crear_usuario", admin: adminName,
+          accountId: c.id, placetaId: placetaFinal, dip: dipFinal,
+          motivo: motivo || "Alta administrativa de usuario bancario", createdAt: now
+        });
+        return json(res, 200, {
+          success: true,
+          message: `${usuario.displayName || dipFinal} dado de alta como usuario bancario${existente ? " (ya existía)" : ""}`,
+          usuario: { dip: dipFinal, placetaId: placetaFinal, displayName: usuario.displayName, eip: usuario.eip },
+          auditLogId: logId
+        });
+      }
+
       // ── Alta en Tributos ─────────────────────────────────────────────
       if (action === "alta-tributos") {
         const targetId = accountId || cuentaId;
@@ -647,7 +689,7 @@ export default async function handler(req, res) {
         });
       }
 
-      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, transferir-masivo, pagar-regalia, revertir-transferencia, retribuir, crear-fondo-apoyo, guardar-config, responder-soporte o borrar-cuenta' });
+      return json(res, 400, { error: 'Action debe ser emitir, quemar, cambiar-tipo, asignar-eip, crear-usuario, alta-tributos, crear-cuenta-infantil, bono-bienvenida, transferir, transferir-masivo, pagar-regalia, revertir-transferencia, retribuir, crear-fondo-apoyo, guardar-config, responder-soporte o borrar-cuenta' });
     }
 
     return json(res, 405, { error: "method_not_allowed" });
