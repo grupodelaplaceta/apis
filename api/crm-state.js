@@ -298,6 +298,18 @@ export default async function handler(req, res) {
         const totalDebit = Number(amount);
         const suffix = esDemo ? ' (Demo)' : '';
 
+        // Límite de envío de las cuentas Child (Placeta Junior): los menores
+        // solo pueden mover su cuenta según el límite que tienen asignado.
+        if (!esDemo && fromAcc.type === 'Child') {
+          const sendLimitPz = Number(fromAcc.sendLimitPz);
+          if (Number.isFinite(sendLimitPz) && sendLimitPz > 0 && totalDebit > sendLimitPz) {
+            return json(res, 403, {
+              error: `La cuenta infantil tiene un límite de envío de ${sendLimitPz} Pz (intento: ${totalDebit} Pz). Necesita autorización del tutor.`,
+              sendLimitPz, required: totalDebit, necesita_autorizacion_tutor: true
+            });
+          }
+        }
+
         if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
           return json(res, 400, {
             error: `Saldo insuficiente en ${from}: tiene ${fromAcc.balancePz}, necesita ${totalDebit}`,
