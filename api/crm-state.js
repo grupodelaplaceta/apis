@@ -200,7 +200,7 @@ export default async function handler(req, res) {
       // ── Crear cuenta infantil (Placeta Junior) ───────────────────────
       if (action === "crear-cuenta-infantil") {
         const { juniorDip, juniorNombre, tutorAccountId, sendLimitPz, tutorDip } = body;
-        if (!juniorDip || !juniorNombre) return json(res, 400, { error: "Se requiere juniorDip y juniorNombre" });
+        if (!juniorDip || !juniorNombre || !tutorDip) return json(res, 400, { error: "Se requiere juniorDip, juniorNombre y tutorDip legal" });
 
         const accountId = `u-${juniorDip?.toLowerCase().replace(/-/g, '')}`;
         const placetaId = `JUNIOR-${juniorDip?.split('-')[1] || '0000'}`;
@@ -221,6 +221,8 @@ export default async function handler(req, res) {
           displayName: `Placeta Junior - ${juniorNombre}`,
           kind: 'CITIZEN', balancePz: 0, placetaId,
           type: 'Child', parentAccountId: tutorAccountId || 'u-alba',
+          titularDip: juniorDip, cotitular: tutorDip || '', cotitularDip: tutorDip || '',
+          cotitularHastaEdad: 16, cotitularMotivo: 'tutela legal de cuenta Junior',
           sendLimitPz: sendLimitPz || 50,
           citizenshipTier: 'JuniorBasica', iban, huchaLocked: false,
           role: 'Citizen', complianceStatus: 'Clear',
