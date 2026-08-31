@@ -13,6 +13,28 @@ import crypto from "crypto";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
 
+// Normaliza un IBAN/identificador para compararlo de forma tolerante:
+// mayúsculas, sin espacios ni guiones opcionales. Acepta formatos APP
+// (GDLP-AP##-### / CAPI-AP##-###) y WEB (GDLP-W###-#### / numérico).
+function normalizeIban(value) {
+  return String(value || "").toUpperCase().replace(/\s+/g, "");
+}
+
+// Busca una cuenta destino por IBAN (APP o WEB) o por ID interno.
+// Prioridad: 1) ID interno exacto, 2) IBAN normalizado, 3) número de cuenta.
+function findAccountByIbanOrId(state, to) {
+  const raw = String(to || "").trim();
+  if (!raw) return null;
+  const target = normalizeIban(raw);
+  const accounts = state.accounts || [];
+  return (
+    accounts.find((a) => a && String(a.id || "") === raw) ||
+    accounts.find((a) => a && normalizeIban(a.iban) === target) ||
+    accounts.find((a) => a && normalizeIban(a.id) === target) ||
+    null
+  );
+}
+
 // ── Helpers de enmascarado (nunca mostrar datos completos sensibles) ───────
 function maskIban(iban) {
   if (!iban) return "";
@@ -62,6 +84,8 @@ function accountToView(a) {
     kind: a.kind || "CITIZEN",
     balancePz: a.balancePz ?? 0,
     iban: maskIban(a.iban),
+    ibanFull: a.iban || null, // Solo se expone al propio titular (igual que la app)
+    esApp: /-AP\d{2}-\d{3}$/.test(String(a.iban || "")),
     eip: a.eip || null,
     complianceStatus: a.complianceStatus || "Clear",
     citizenshipTier: a.citizenshipTier || null,
@@ -235,8 +259,14 @@ export default async function handler(req, res) {
       if (!fromAcc) {
         return json(res, 403, { error: "No puedes transferir desde una cuenta que no es tuya" });
       }
-      const toAcc = (state.accounts || []).find((a) => a.id === to);
-      if (!toAcc) return json(res, 404, { error: "Cuenta destino no encontrada" });
+      // El destino se acepta por ID interno (compatibilidad) o por IBAN
+      // (formato APP "GDLP-AP##-###"/"CAPI-AP##-###" o formato WEB
+      // "GDLP-W###-####"/numérico), lo que permite transferencias web↔app.
+      const toAcc = findAccountByIbanOrId(state, to);
+      if (!toAcc) return json(res, 404, { error: "Cuenta destino no encontrada. Revisa el IBAN." });
+      if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
+        return json(res, 400, { error: "No puedes transferir a la misma cuenta" });
+      }
       const amount = Math.round(Number(cantidad));
       if (!Number.isFinite(amount) || amount <= 0) {
         return json(res, 400, { error: "Cantidad inválida" });
