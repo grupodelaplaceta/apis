@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vercel dev",
-    "deploy": "vercel --prod"
+    "deploy": "vercel --prod",
+    "test": "node test-reconcile.mjs"
   },
   "dependencies": {
     "@vercel/node": "^5.5.0",

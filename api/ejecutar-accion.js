@@ -1,45 +1,17 @@
 /**
  * Ejecutar Acción — Procesa acciones firmadas desde admin-placeta
- * 
+ *
  * Llamado por admin-placeta cuando un documento ha sido firmado.
  * Ejecuta la acción correspondiente en el banco (crear cuenta, modificar, etc.)
+ * y la persiste con la librería autoritativa (lock + reconciliación servidor),
+ * en la MISMA base de datos de backend-banco. Ya no depende del mongo-bridge
+ * (localhost:8787) que no existe en producción.
  */
 
 import crypto from 'crypto';
+import { readBankState, writeBankState } from '../lib/bankCollections.js';
 
-const MONGO_BRIDGE_URL = process.env.MONGO_BRIDGE_URL || 'http://localhost:8787';
-const PLACETA_API_SECRET = process.env.PLACETA_API_SECRET || '';
 const VALID_API_KEYS = (process.env.DOCS_API_KEYS || 'docs-shared-key-2026').split(',');
-
-function buildSignedTransaction(method, path, body = '') {
-  const timestamp = String(Date.now());
-  const nonce = crypto.randomUUID();
-  const bodyHash = crypto.createHash('sha256').update(body).digest('hex');
-  const payload = [method, path, timestamp, nonce, bodyHash].join('\n');
-  const signature = crypto.createHmac('sha256', PLACETA_API_SECRET).update(payload).digest('hex');
-  return {
-    'Content-Type': 'application/json',
-    'x-placeta-timestamp': timestamp,
-    'x-placeta-nonce': nonce,
-    'x-placeta-signature': signature,
-    'x-placeta-app-id': 'org.laplaceta.banco'
-  };
-}
-
-async function getBankState() {
-  const headers = buildSignedTransaction('GET', '/api/state');
-  const r = await fetch(`${MONGO_BRIDGE_URL}/api/state`, { headers });
-  if (!r.ok) throw new Error(`Banco API error: ${r.status}`);
-  return r.json();
-}
-
-async function saveBankState(state) {
-  const body = JSON.stringify(state);
-  const headers = buildSignedTransaction('PUT', '/api/state', body);
-  const r = await fetch(`${MONGO_BRIDGE_URL}/api/state`, { method: 'PUT', headers, body });
-  if (!r.ok) throw new Error(`Error guardando: ${r.status}`);
-  return r.json();
-}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -62,7 +34,7 @@ export default async function handler(req, res) {
   if (!action) return res.status(400).json({ error: 'action requerido' });
 
   try {
-    const state = await getBankState();
+    const state = await readBankState();
     let result;
 
     switch (action) {
@@ -88,22 +60,19 @@ export default async function handler(req, res) {
         return res.status(400).json({ error: `Acción desconocida: ${action}` });
     }
 
-    // Guardar estado actualizado
-    await saveBankState(state);
-
-    // Registrar transacción de auditoría
-    state.transactions = state.transactions || [];
-    state.transactions.push({
+    // Registrar auditoría (colección propia, se conserva en la reconciliación)
+    state.auditLogs = state.auditLogs || [];
+    state.auditLogs.push({
       id: `audit-${actionId || crypto.randomUUID()}`,
-      kind: 'Audit',
-      fromAccountId: 'SYSTEM',
-      toAccountId: firmadoPor || 'unknown',
-      amountPz: 0,
-      concept: `Acción firmada: ${action}`,
-      note: `ActionID: ${actionId || 'N/A'} · Data: ${JSON.stringify(data)}`,
-      status: 'Settled',
+      action: `Acción firmada: ${action}`,
+      admin: firmadoPor || 'unknown',
+      accountId: data?.accountId || data?.cuentaId || null,
+      reason: JSON.stringify(data),
       createdAt: new Date().toISOString()
     });
+
+    // Guardar con la librería autoritativa: lock + reconciliación + upsert.
+    await writeBankState(state);
 
     res.json({
       success: true,

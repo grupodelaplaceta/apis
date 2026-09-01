@@ -7,8 +7,10 @@ const CRM_KEY = process.env.CRM_READ_KEY || '';
 function uuid() { return crypto.randomUUID(); }
 
 async function writeAndReadState(state) {
-  await writeBankState(state);
-  return readBankState();
+  // writeBankState devuelve el estado ya reconciliado (saldos aplicados por el
+  // servidor), así no hace falta releer todo el estado después de guardar.
+  const result = await writeBankState(state, { includeState: true });
+  return result.state;
 }
 
 function requireCrmKey(req, res) {
@@ -214,7 +216,14 @@ export default async function handler(req, res) {
 
         // Verificar si ya existe
         const exists = (state.accounts || []).find(a => a.id === accountId);
-        if (exists) return json(res, 200, { accountId, iban: exists.iban || iban, exists: true });
+        if (exists) {
+          // Migración de cuentas antiguas CAPI-* al formato GDLP reconocido.
+          if (!String(exists.iban || '').toUpperCase().startsWith('GDLP-')) {
+            exists.iban = iban;
+            await writeBankState(state);
+          }
+          return json(res, 200, { accountId, iban: exists.iban || iban, exists: true });
+        }
 
         const newAccount = {
           _id: accountId, id: accountId,
