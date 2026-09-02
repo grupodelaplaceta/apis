@@ -10,6 +10,8 @@
 //   GET  /api/v1/tributos/declaraciones/breakdown-iva → desglose IVA
 //   POST /api/v1/tributos/facturas/nueva              → alta de factura
 //   POST /api/v1/tributos/regularizaciones/verificar  → verificar regularización
+//   GET  /api/v1/tributos/facturacion?eip=&mes=        → facturas del mes + IVA (app)
+//   POST /api/v1/tributos/facturacion/pagar-iva        → ordena pago IVA (Pending a TGLP)
 import { json, methodNotAllowed, readBody } from "../../../lib/http.js";
 import {
   answerOptions, createCorsHeaders,
@@ -17,6 +19,7 @@ import {
   findContributorByEip, listDeclarationsForContributor,
   getBreakdown, createInvoice, verifyRegularization
 } from "../../../lib/tributos.js";
+import { crearPagoIvaPendiente } from "../../../lib/pagoIva.js";
 
 const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://rsp.laplaceta.org';
 const TRIBUTOS_API_KEY = process.env.TRIBUTOS_API_KEY || 'android-tributos-key-2026';
@@ -166,7 +169,7 @@ export default async function handler(req, res) {
     // pestaña «Facturación» de la app (Sociedades). Proxy a RSP con la misma
     // clave que /subvenciones; el eip lo aporta la app desde la empresa que
     // el titular/gestor tiene seleccionada.
-    if (first === 'facturacion') {
+    if (first === 'facturacion' && seg[1] !== 'pagar-iva') {
       if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
       const url = new URL(req.url, 'https://api.local');
       const eip = (url.searchParams.get('eip') || url.searchParams.get('EIP') || '').toUpperCase();
@@ -183,6 +186,33 @@ export default async function handler(req, res) {
       } catch (e) {
         return json(res, 502, { error: 'rsp_facturacion_no_disponible: ' + e.message });
       }
+    }
+
+    // ── POST /facturacion/pagar-iva ───────────────────────────────────
+    // Pago del IVA de facturas seleccionadas (de golpe) desde la APP. Crea la
+    // transferencia PENDING empresa→TGLP (helper compartido lib/pagoIva.js);
+    // NO mueve dinero: se ejecuta al confirmarla en PlacetaID Móvil (firma del
+    // titular). Mismo contrato de confianza que el resto de consultas por EIP.
+    if (first === 'facturacion' && seg[1] === 'pagar-iva') {
+      if (req.method !== 'POST') return methodNotAllowed(res, ['POST', 'OPTIONS']);
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const { from, eip, mes, facturaIds } = body;
+      const creado = await crearPagoIvaPendiente({
+        from: String(from || ''),
+        eip: String(eip || ''),
+        mes: String(mes || new Date().toISOString().slice(0, 7)),
+        facturaIds: Array.isArray(facturaIds) ? facturaIds : [],
+        origen: 'banco-app-facturacion',
+        actorDip: '',
+      });
+      if (!creado.ok) {
+        return json(res, creado.status || 500, {
+          error: creado.error || 'No se pudo ordenar el pago del IVA',
+          ...(creado.invalidas ? { invalidas: creado.invalidas } : {}),
+          ...(creado.saldo != null ? { saldo: creado.saldo, requerido: creado.requerido } : {}),
+        });
+      }
+      return json(res, 201, { ok: true, pago: creado.pago });
     }
 
     // ── GET /declaraciones/listar ─────────────────────────────────────
