@@ -337,8 +337,14 @@ export default async function handler(req, res) {
         };
         const newTransactions = [tx];
 
+        // Empresas del Grupo (destino Business privada): el IVA de su venta se
+        // gestiona por FACTURA en RSP (pago selectivo/agrupado) y NO se
+        // descuenta aquí automáticamente, para no pagar el IVA dos veces.
+        // Capitalia/AGLDP/TGLP/FUND y el modo demo siguen liquidando al momento.
+        const esEmpresaPrivada = Boolean(toAcc && toAcc.type === 'Business' && !['CAPITALIA_BANK', 'AGLDP', 'TGLP', 'FUND-BLP'].includes(toAcc.id));
+        const ivaDiferido = esEmpresaPrivada && !esDemo;
         // IVA: destino (Capitalia) paga el IVA a TGLP
-        if (ivaPz > 0 && !esDemo) {
+        if (ivaPz > 0 && !esDemo && !ivaDiferido) {
           newTransactions.push({
             id: uuid(), kind: 'Tax', fromAccountId: to, toAccountId: 'TGLP',
             amountPz: ivaPz, ivaPz: 0, netAmount: ivaPz, taxAmount: 0,
@@ -353,7 +359,7 @@ export default async function handler(req, res) {
         const confirmedTo = (confirmed.accounts || []).find(a => a.id === to) || toAcc;
 
         return json(res, 200, {
-          success: true, transactionId: txId, esDemo,
+          success: true, transactionId: txId, esDemo, ivaDiferido,
           fromBalance: confirmedFrom.balancePz, toBalance: confirmedTo.balancePz,
           ivaPz, netAmount: amount
         });
@@ -389,6 +395,9 @@ export default async function handler(req, res) {
           const ivaPz = Number(iva) || 0;
           const totalDebit = Number(amount);
           const suffix = esDemo ? ' (Demo)' : '';
+          // Empresas del Grupo: IVA diferido por factura (mismo criterio que arriba).
+          const esEmpresaPrivada = Boolean(toAcc && toAcc.type === 'Business' && !['CAPITALIA_BANK', 'AGLDP', 'TGLP', 'FUND-BLP'].includes(toAcc.id));
+          const ivaDiferido = esEmpresaPrivada && !esDemo;
 
           if (!esDemo && (fromAcc.balancePz || 0) < totalDebit) {
             resultados.push({ from, to, cantidad: amount, success: false, error: `Saldo insuficiente en ${from}: tiene ${fromAcc.balancePz}, necesita ${totalDebit}` });
@@ -403,7 +412,7 @@ export default async function handler(req, res) {
             IBAN_Origin: fromAcc.iban || '', originalTransactionId: null
           };
           nuevasTx.push(tx);
-          if (ivaPz > 0 && !esDemo) {
+          if (ivaPz > 0 && !esDemo && !ivaDiferido) {
             nuevasTx.push({
               id: uuid(), kind: 'Tax', fromAccountId: to, toAccountId: 'TGLP',
               amountPz: ivaPz, ivaPz: 0, netAmount: ivaPz, taxAmount: 0,
@@ -411,7 +420,7 @@ export default async function handler(req, res) {
               IBAN_Origin: toAcc.iban || '', originalTransactionId: txId
             });
           }
-          resultados.push({ from, to, cantidad: amount, concepto: concepto || null, iva: ivaPz, transactionId: txId, success: true, esDemo });
+          resultados.push({ from, to, cantidad: amount, concepto: concepto || null, iva: ivaPz, ivaDiferido, transactionId: txId, success: true, esDemo });
         }
 
         if (nuevasTx.length) {
