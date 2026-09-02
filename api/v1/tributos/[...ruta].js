@@ -161,6 +161,30 @@ export default async function handler(req, res) {
       }
     }
 
+    // ── GET /facturacion ──────────────────────────────────────────────
+    // Facturas del mes de UNA empresa (RSP) + su IVA pendiente, para la
+    // pestaña «Facturación» de la app (Sociedades). Proxy a RSP con la misma
+    // clave que /subvenciones; el eip lo aporta la app desde la empresa que
+    // el titular/gestor tiene seleccionada.
+    if (first === 'facturacion') {
+      if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
+      const url = new URL(req.url, 'https://api.local');
+      const eip = (url.searchParams.get('eip') || url.searchParams.get('EIP') || '').toUpperCase();
+      const mes = url.searchParams.get('mes') || new Date().toISOString().slice(0, 7);
+      if (!eip) return json(res, 400, { error: 'eip_requerido' });
+      try {
+        const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/facturacion?eip=${encodeURIComponent(eip)}&mes=${encodeURIComponent(mes)}`, {
+          headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' },
+          signal: AbortSignal.timeout(9000)
+        });
+        const body = await r.json();
+        if (!r.ok) return json(res, r.status, { error: body?.error || 'rsp_facturacion_error' });
+        return json(res, 200, body);
+      } catch (e) {
+        return json(res, 502, { error: 'rsp_facturacion_no_disponible: ' + e.message });
+      }
+    }
+
     // ── GET /declaraciones/listar ─────────────────────────────────────
     if (first === 'declaraciones' && seg[1] === 'listar') {
       if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);

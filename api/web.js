@@ -13,6 +13,41 @@ import crypto from "crypto";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
 
+// RSP es el origen de verdad de las facturas de las empresas. El gateway de
+// tributos llama a /api/v1/tributos/facturacion con esta clave compartida.
+const RSP_URL = (process.env.ADMIN_PLACETA_URL || "https://rsp.laplaceta.org").replace(/\/+$/, "");
+const RSP_TRIBUTOS_KEY = process.env.TRIBUTOS_API_KEY || "";
+const CUENTA_TRIBUTOS_ID = "TGLP";
+
+async function fetchFacturacionEip(eip, mes) {
+  if (!RSP_TRIBUTOS_KEY) return { ok: false, status: 503, body: { error: "tributos_api_key_no_configurada" } };
+  try {
+    const qs = new URLSearchParams({ eip: String(eip), mes: String(mes) });
+    const r = await fetch(`${RSP_URL}/api/v1/tributos/facturacion?${qs}`, {
+      headers: { "X-API-Key": RSP_TRIBUTOS_KEY, "X-Platform": "web" },
+    });
+    const body = await r.json().catch(() => ({}));
+    return { ok: r.ok, status: r.status, body };
+  } catch (e) {
+    return { ok: false, status: 502, body: { error: `rsp_facturacion_no_disponible: ${e.message}` } };
+  }
+}
+
+// Cuentas de empresa (Business) del titular/gestor y sus EIPs únicos.
+function empresasDelOwner(owner) {
+  const porEip = new Map();
+  for (const a of owner.accounts || []) {
+    const tipo = String(a.type || a.kind || "").toLowerCase();
+    const eip = String(a.eip || "").toUpperCase();
+    if (tipo !== "business" && tipo !== "state") continue;
+    if (!eip) continue;
+    let g = porEip.get(eip);
+    if (!g) { g = { eip, nombre: a.displayName || a.name || eip, cuentas: [] }; porEip.set(eip, g); }
+    g.cuentas.push({ id: a.id, displayName: a.displayName || a.id, saldo: a.balancePz ?? 0 });
+  }
+  return Array.from(porEip.values());
+}
+
 // Normaliza un IBAN/identificador para compararlo de forma tolerante:
 // mayúsculas, sin espacios ni guiones opcionales. Acepta formatos APP
 // (GDLP-AP##-### / CAPI-AP##-###) y WEB (GDLP-W###-#### / numérico).
@@ -320,6 +355,150 @@ export default async function handler(req, res) {
           from,
           to,
           createdAt: now
+        }
+      });
+    }
+
+    // ── Facturación: facturas del mes de TUS empresas + IVA pendiente ──
+    // Solo lectura (RSP es el origen de verdad). Se devuelven las facturas
+    // de las cuentas Business del titular/gestor (regla de oro: solo lo tuyo).
+    if (req.method === "GET" && path === "/api/web/facturacion") {
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const mes = String(url.searchParams.get("mes") || new Date().toISOString().slice(0, 7));
+      const empresas = empresasDelOwner(owner);
+      if (empresas.length === 0) {
+        return json(res, 200, { ok: true, mes, empresas: [], mensaje: "No tienes cuentas de empresa con EIP" });
+      }
+      const conDatos = [];
+      for (const emp of empresas) {
+        const r = await fetchFacturacionEip(emp.eip, mes);
+        if (!r.ok) continue; // si una empresa no está en el ciclo, no la incluimos
+        conDatos.push({
+          eip: emp.eip,
+          nombre: r.body.empresa?.nombre || emp.nombre,
+          cuentas: emp.cuentas,
+          facturas: r.body.facturas || [],
+          totalFacturas: r.body.totalFacturas || 0,
+          totalIvaVentas: r.body.totalIvaVentas || 0,
+          totalIvaPagado: r.body.totalIvaPagado || 0,
+          ivaPendiente: r.body.totalIvaPendiente ?? r.body.ivaAIngresar ?? 0
+        });
+      }
+      return json(res, 200, { ok: true, mes, empresas: conDatos });
+    }
+
+    // ── Pagar el IVA de facturas seleccionadas (de golpe) ─────────────
+    // Crea una transferencia PENDING de la empresa a TGLP por el IVA de las
+    // facturas elegidas (todas pendientes, nunca repetidas). El abono real se
+    // ejecuta al confirmarla en PlacetaID Móvil (firma). El concepto lleva las
+    // referencias FAC-… para que RSP concilie y marque las facturas pagadas.
+    if (req.method === "POST" && path === "/api/web/facturacion/pagar-iva") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { from, mes } = body;
+      const facturaIds = Array.isArray(body.facturaIds)
+        ? body.facturaIds.map((x) => String(x)).filter(Boolean)
+        : [];
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      if (!from) return json(res, 400, { error: "from_requerido" });
+      if (facturaIds.length === 0) return json(res, 400, { error: "facturaIds_requeridos" });
+
+      const fromAcc = owner.accounts.find((a) => a.id === from);
+      if (!fromAcc) {
+        return json(res, 403, { error: "La cuenta no te pertenece" });
+      }
+      const eip = String(fromAcc.eip || "").toUpperCase();
+      if (!eip) {
+        return json(res, 403, { error: "Solo las cuentas de empresa pueden pagar IVA de facturas" });
+      }
+      const periodo = String(mes || new Date().toISOString().slice(0, 7));
+      const r = await fetchFacturacionEip(eip, periodo);
+      if (!r.ok) {
+        return json(res, r.status === 503 ? 503 : 502, { error: r.body?.error || "rsp_facturacion_no_disponible" });
+      }
+      const facturas = Array.isArray(r.body.facturas) ? r.body.facturas : [];
+      const porId = new Map(facturas.map((f) => [String(f.id), f]));
+      const aPagar = facturaIds.filter((id) => {
+        const f = porId.get(id);
+        return f && !f.ivaPagado; // solo facturas pendientes y de esta empresa
+      });
+      const invalidas = facturaIds.filter((id) => {
+        const f = porId.get(id);
+        return !f || f.ivaPagado;
+      });
+      if (invalidas.length) {
+        return json(res, 409, {
+          error: "Hay facturas que no existen o cuyo IVA ya está pagado",
+          invalidas
+        });
+      }
+      const totalIva = Math.round((aPagar.reduce((s, id) => s + (Number(porId.get(id).iva) || 0), 0)) * 100) / 100;
+      if (!(totalIva > 0)) {
+        return json(res, 400, { error: "No hay IVA pendiente que pagar" });
+      }
+      if ((fromAcc.balancePz ?? 0) < totalIva) {
+        return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: totalIva });
+      }
+      const toAcc = findAccountByIbanOrId(state, CUENTA_TRIBUTOS_ID);
+      if (!toAcc) {
+        return json(res, 404, { error: "Cuenta de Tributos (TGLP) no encontrada" });
+      }
+
+      const now = new Date().toISOString();
+      const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
+      const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
+      const concepto = `Pago IVA facturas ${periodo} · ${eip} · refs:${aPagar.join(",")}`;
+
+      // Registro pendiente (NO mueve saldos): el IVA viaja como cantidad del
+      // abono (ivaPz 0) → es una TRANSFERENCIA al Banco, nunca PlaceZum.
+      await upsertEntity("bank_transactions", pendingId, {
+        id: pendingId,
+        kind: "Transfer",
+        fromAccountId: from,
+        toAccountId: toAcc.id,
+        amountPz: totalIva,
+        ivaPz: 0,
+        netAmount: totalIva,
+        taxAmount: 0,
+        concept: concepto,
+        status: "Pending",
+        firmaRequerida: true,
+        executionCode,
+        source: "banco-web-facturacion",
+        eip,
+        mes: periodo,
+        refs: aPagar,
+        createdAt: now,
+        updatedAt: now,
+        IBAN_Origin: fromAcc.iban || ""
+      });
+      await upsertEntity("bank_audit_logs", `aud-${pendingId}`, {
+        id: `aud-${pendingId}`,
+        action: "pago_iva_web_pendiente",
+        admin: req.placetaIdUser.dip,
+        cantidad: totalIva,
+        accountId: from,
+        eip,
+        mes: periodo,
+        refs: aPagar,
+        motivo: concepto,
+        createdAt: now
+      });
+
+      return json(res, 201, {
+        ok: true,
+        pago: {
+          id: pendingId,
+          estado: "Pending",
+          executionCode,
+          eip,
+          mes: periodo,
+          importe: totalIva,
+          facturas: aPagar,
+          mensaje: `Se ordenó el pago de ${aPagar.length} facturas por ${totalIva} Pz a Tributos. Confírmalo en PlacetaID Móvil para ejecutarlo.`
         }
       });
     }
