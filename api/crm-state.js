@@ -1,5 +1,6 @@
 import { json, readBody } from "../lib/http.js";
 import { readBankState, writeBankState, upsertEntity, deleteEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
+import { leerNumero } from "../lib/valores-bop.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -206,8 +207,6 @@ export default async function handler(req, res) {
 
         const accountId = `u-${juniorDip?.toLowerCase().replace(/-/g, '')}`;
         const placetaId = `JUNIOR-${juniorDip?.split('-')[1] || '0000'}`;
-
-        // IBAN formato oficial app: GDLP-AP{control}-{body}
         const seed = juniorDip?.toUpperCase().replace(/[^A-Z0-9]/g, '') || '0000';
         let ibanAcc = 17;
         for (const ch of seed) ibanAcc = (ibanAcc * 31 + ch.charCodeAt(0)) % 1000;
@@ -225,6 +224,13 @@ export default async function handler(req, res) {
           return json(res, 200, { accountId, iban: exists.iban || iban, exists: true });
         }
 
+        // Límite diario de envío de la cuenta Junior básica: CNIC del BOLP
+        // (CNIC-CUENTA-JUNIOR-BASICA-TRANSFERENCIA, CNI-BANCO Art. 1; fallback
+        // 50 Pz) salvo que el alta indique otro explícitamente.
+        const sendLimitFinal = Number.isFinite(Number(sendLimitPz)) && Number(sendLimitPz) > 0
+          ? Number(sendLimitPz)
+          : Math.round(await leerNumero('CNIC-CUENTA-JUNIOR-BASICA-TRANSFERENCIA', 50));
+
         const newAccount = {
           _id: accountId, id: accountId,
           displayName: `Placeta Junior - ${juniorNombre}`,
@@ -232,7 +238,7 @@ export default async function handler(req, res) {
           type: 'Child', parentAccountId: tutorAccountId || 'u-alba',
           titularDip: juniorDip, cotitular: tutorDip || '', cotitularDip: tutorDip || '',
           cotitularHastaEdad: 16, cotitularMotivo: 'tutela legal de cuenta Junior',
-          sendLimitPz: sendLimitPz || 50,
+          sendLimitPz: sendLimitFinal,
           citizenshipTier: 'JuniorBasica', iban, huchaLocked: false,
           role: 'Citizen', complianceStatus: 'Clear',
           fundsJustificationApproved: true, investmentRiskLevel: 1,
@@ -264,7 +270,10 @@ export default async function handler(req, res) {
 
         const esDemo = tDip === '11111111D' || (jDip || '').includes('DEMO');
         const suffix = esDemo ? ' (Demo)' : '';
-        const amountPz = 750;
+        // Cuantía normativa del CNI-BANCO (Art. 2) leída en vivo del BOLP:
+        // bono de bienvenida de la cuenta Junior básica (menores de 16),
+        // fallback 750 Pz si el boletín no está disponible.
+        const amountPz = Math.round(await leerNumero('CNIC-BONO-BIENVENIDA-JUNIOR-BASICA', 750));
 
         if (!esDemo && (from.balancePz || 0) < amountPz) {
           return json(res, 400, { error: "Saldo insuficiente en AGLDP" });

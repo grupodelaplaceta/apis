@@ -1,6 +1,7 @@
 import { json, methodNotAllowed, readBody } from "../lib/http.js";
 import { assertRequestAllowed, throwHttp } from "../lib/security.js";
 import { readBankState, upsertEntity, readEntityCollection } from "../lib/bankCollections.js";
+import { leerNumero } from "../lib/valores-bop.js";
 import crypto from "crypto";
 import { config } from "../lib/config.js";
 
@@ -70,8 +71,10 @@ export default async function handler(req, res) {
     }
 
     const isPayment = kind === "Payment" || kind === "payment";
+    // Tipo de IVA vigente del BOLP (CNIC-IVA, CNI-BANCO Art. 4) con fallback 12 %.
+    const ivaPorcentaje = await leerNumero("CNIC-IVA", 12);
     const ivaPz = (isPayment && creatorAccount.type === "Business")
-      ? Math.ceil(parsedAmount * 0.12)
+      ? Math.ceil(parsedAmount * Number(ivaPorcentaje) / 100)
       : 0;
     const totalPz = parsedAmount + ivaPz;
 
