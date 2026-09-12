@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vercel dev",
     "deploy": "vercel --prod",
-    "test": "node test-reconcile.mjs"
+    "test": "node test-reconcile.mjs && node test-registro.mjs",
+    "test:reconcile": "node test-reconcile.mjs",
+    "test:registro": "node test-registro.mjs"
   },
   "dependencies": {
     "@vercel/node": "^5.5.0",

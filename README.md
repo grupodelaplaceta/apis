@@ -31,6 +31,45 @@ vercel --prod
 - `DELETE https://api.banco.laplaceta.org/api/entity?collection=accounts&id=u-alba`: borra una entidad.
 - `GET https://api.banco.laplaceta.org/api/health`: ping protegido.
 
+Endpoints ciudadanos (`/api/web/*`, Bearer PlacetaID):
+
+- `GET /api/web/cuenta` · `GET /api/web/movimientos` · `GET /api/web/tarjetas` · `GET /api/web/gestores` · `GET /api/web/cumplimiento` · `GET /api/web/contactos`
+- `POST /api/web/transferencia` (crea operación pendiente)
+- `GET /api/web/registro`: consulta previa. Devuelve si el DIP del titular ya existe en el banco y qué cuentas tiene.
+- `POST /api/web/registro`: **alta por DIP de PlacetaID** (ver abajo).
+
+## Alta por DIP de PlacetaID (`/api/web/registro`)
+
+Cualquier DIP válido de PlacetaID (DNI `12345678Z` o NIE `X1234567L`) puede darse
+de alta en el banco por sí mismo: solo hace falta el Bearer de su sesión de
+PlacetaID. El DIP se toma **siempre del token**, nunca del cuerpo de la petición.
+
+Antes de crear nada, el servidor **busca por el DIP** en el estado real
+(`bank_users` + `bank_accounts` + `bank_account_holders`) comparando por
+identidad canónica, de modo que `12345678Z`, `PLID-12345678Z` y `DIP-12345678Z`
+son la misma persona. Resultado:
+
+| Caso | Qué hace |
+| --- | --- |
+| Ya tiene cuentas y usuario | Nada (idempotente). Devuelve sus cuentas. |
+| Tiene cuentas pero **no** `bank_user` (titulares migrados) | Crea el `bank_user` y lo vincula a su cuenta existente. **No duplica cuentas.** |
+| Tiene `bank_user` pero le falta la cuenta | Abre la cuenta que falte y la marca como principal. |
+| No tiene nada (adulto) | Abre cuenta corriente ciudadana `GDLP-AP##-###`, saldo 0. |
+| No tiene nada (menor de 18) | Registra su identidad; la cuenta la abre un tutor legal (`requiereTutor: true`). |
+
+Respuestas: `200` (vinculado / ya existía), `201` (cuenta abierta), `400`
+`dip_invalido`. Todas las altas quedan auditadas en `bank_audit_logs` con
+`action: "registro_placetaid"`.
+
+```bash
+# Consulta previa
+curl -H "Authorization: Bearer $TOKEN" https://api.banco.laplaceta.org/api/web/registro
+# Alta
+curl -X POST -H "Authorization: Bearer $TOKEN" https://api.banco.laplaceta.org/api/web/registro
+```
+
+Pruebas locales de la lógica (sin Mongo): `npm test` (reconciliación + registro).
+
 Todos los endpoints requieren una de estas dos autenticaciones:
 
 - Firma HMAC para llamadas servidor-a-servidor.

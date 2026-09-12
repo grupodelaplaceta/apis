@@ -9,6 +9,7 @@
 import { json, methodNotAllowed, readBody } from "../lib/http.js";
 import { assertPlacetaIdBearer } from "../lib/security.js";
 import { readBankState, upsertEntity } from "../lib/bankCollections.js";
+import { buscarTitularPorDip, esCuentaPersonalViva, esDipValido, registrarTitularPorPlacetaId } from "../lib/registroPlacetaId.js";
 import crypto from "crypto";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
@@ -92,23 +93,25 @@ function maskEmail(email) {
 }
 
 // ── Resolución de titular + sus cuentas ─────────────────────────────────────
+// Se resuelve por DIP tolerando los alias con los que el banco guarda a la
+// misma persona (DIP, PLID-DIP, prefijos antiguos y cotitularías), de modo que
+// un titular con cuentas pero sin `bank_user` (migrados) también las vea.
 function resolveOwner(state, dip) {
-  const user = (state.users || []).find(
-    (u) => String(u.dip || "").toUpperCase() === String(dip).toUpperCase()
-  );
-  if (!user) return null;
-  const placetaId = user.placetaId || user.dip;
-  const holderIds = (state.accountHolders || [])
-    .filter((h) => String(h.placetaId || "").toUpperCase() === String(placetaId).toUpperCase())
-    .map((h) => h.accountId);
-  const accounts = (state.accounts || []).filter(
-    (a) =>
-      a &&
-      (String(a.placetaId || "").toUpperCase() === String(placetaId).toUpperCase() ||
-        (user.primaryAccountId && a.id === user.primaryAccountId) ||
-        holderIds.includes(a.id))
-  );
-  return { user, placetaId, accounts };
+  const busqueda = buscarTitularPorDip(state, dip);
+  if (!busqueda.usuario && busqueda.cuentas.length === 0) return null;
+  const dipLimpio = String(dip || "").trim().toUpperCase();
+  const user = busqueda.usuario || {
+    dip: dipLimpio,
+    placetaId: busqueda.cuentas[0]?.placetaId || dipLimpio,
+    displayName: busqueda.cuentas[0]?.displayName || dipLimpio,
+    role: "Citizen"
+  };
+  const placetaId = user.placetaId || user.dip || dipLimpio;
+  return { user, placetaId, accounts: busqueda.cuentas, registrado: !!busqueda.usuario };
+}
+
+function dipNormalizadoDe(placetaIdUser) {
+  return String(placetaIdUser?.dip || "").trim().toUpperCase();
 }
 
 function accountToView(a) {
@@ -141,6 +144,75 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "https://api.local");
     const path = url.pathname.replace(/\/+$/, "") || "/";
 
+    // ── Alta por DIP de PlacetaID ─────────────────────────────────────────
+    // Cualquier DIP válido de PlacetaID puede registrarse en el banco por sí
+    // mismo. Antes de crear nada se BUSCA por el DIP si ya tiene cuentas: si
+    // las tiene, se vincula (no se duplica); si no, se le abre cuenta.
+    if (path === "/api/web/registro") {
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      if (!esDipValido(dip)) {
+        return json(res, 400, { error: "dip_invalido", dip });
+      }
+
+      if (req.method === "GET") {
+        const estado = await readBankState();
+        const busqueda = buscarTitularPorDip(estado, dip);
+        const principal =
+          busqueda.cuentasTitular.find(esCuentaPersonalViva) || busqueda.cuentas[0] || null;
+        return json(res, 200, {
+          ok: true,
+          dip,
+          registrado: !!busqueda.usuario,
+          yaTeniaCuentas: busqueda.cuentas.length > 0,
+          cuentasEncontradas: busqueda.cuentas.length,
+          cuentaPrincipalId: busqueda.usuario?.primaryAccountId || principal?.id || null,
+          cuentas: busqueda.cuentas.map(accountToView)
+        });
+      }
+
+      if (req.method === "POST") {
+        // El DIP es SIEMPRE el del token PlacetaID (nunca el del cuerpo); se
+        // consume el cuerpo igualmente para no dejar la petición a medias.
+        await readBody(req).catch(() => "");
+        const registro = await registrarTitularPorPlacetaId({
+          dip,
+          nombre: String(req.placetaIdUser?.nombre || "").trim(),
+          edad: req.placetaIdUser?.edad ?? null,
+          origen: "banco-web"
+        });
+        return json(res, registro.cuentaCreada ? 201 : 200, {
+          ok: true,
+          registro: {
+            dip: registro.dip,
+            placetaId: registro.usuario.placetaId,
+            usuarioCreado: registro.usuarioCreado,
+            cuentaCreada: registro.cuentaCreada,
+            yaTeniaCuentas: registro.yaTeniaCuentas,
+            cuentasEncontradas: registro.cuentasExistentes.length,
+            requiereTutor: registro.requiereTutor,
+            cuentaPrincipalId: registro.cuenta?.id || null,
+            mensaje: registro.requiereTutor
+              ? "Identidad registrada. Al ser menor de edad, la cuenta debe abrirla un tutor legal."
+              : registro.cuentaCreada
+                ? "Cuenta abierta en el Banco de La Placeta."
+                : registro.usuarioCreado
+                  ? "Se han encontrado tus cuentas existentes y se ha activado tu acceso."
+                  : "Tu acceso al banco ya estaba activo."
+          },
+          usuario: {
+            dip: registro.usuario.dip,
+            placetaId: registro.usuario.placetaId,
+            displayName: registro.usuario.displayName || "Titular",
+            primaryAccountId: registro.usuario.primaryAccountId || null,
+            censado: !!registro.usuario.tributosCensusDate
+          },
+          cuentas: (registro.cuentas || []).map(accountToView)
+        });
+      }
+
+      return methodNotAllowed(res, ["GET", "POST"]);
+    }
+
     if (req.method === "GET" && path === "/api/web/cuenta") {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
@@ -151,11 +223,12 @@ export default async function handler(req, res) {
           dip: u.dip,
           placetaId: u.placetaId,
           displayName: u.displayName || "Titular",
-          primaryAccountId: u.primaryAccountId || null,
+          primaryAccountId: u.primaryAccountId || owner.accounts[0]?.id || null,
           censado: !!u.tributosCensusDate,
           tributosCensusDate: u.tributosCensusDate || null,
           eip: u.eip || null,
-          role: u.role || "Citizen"
+          role: u.role || "Citizen",
+          registrado: owner.registrado
         },
         cuentas: owner.accounts.map(accountToView)
       });
