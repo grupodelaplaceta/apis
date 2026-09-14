@@ -82,5 +82,16 @@ console.log("4) Validación de transferencia Junior:");
   check("Junior→ciudadano rechazado (whitelist)", !salida.ok && salida.error === "contraparte_no_permitida", JSON.stringify(salida));
 }
 
+console.log("5) Límite configurable y acumulado de lote:");
+{
+  const state = { accounts: [junior, organismo], transactions: [] };
+  check("límite personalizado rechaza exceso", !validarTransferenciaJunior(state, "CAPITALIA_BANK", "u-nino", 300, MES, 200).ok, "300>200");
+  check("dentro de límite personalizado ok", validarTransferenciaJunior(state, "CAPITALIA_BANK", "u-nino", 150, MES, 200).ok, "150<200");
+  // 400 ya acumulados en el lote + 200 = 600 > 500
+  const lote = validarTransferenciaJunior(state, "CAPITALIA_BANK", "u-nino", 200, MES, 500, 400);
+  check("acumuladoExtra bloquea el lote", !lote.ok && lote.error === "limite_mensual_junior_excedido", JSON.stringify(lote));
+  check("devuelve juniorId para acumular", validarTransferenciaJunior(state, "CAPITALIA_BANK", "u-nino", 100, MES).juniorId === "u-nino", "juniorId");
+}
+
 console.log(`\n${pass} OK, ${fail} fallos`);
 process.exit(fail === 0 ? 0 : 1);

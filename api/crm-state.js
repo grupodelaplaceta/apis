@@ -2,7 +2,7 @@ import { json, readBody } from "../lib/http.js";
 import { readBankState, writeBankState, upsertEntity, deleteEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
 import { leerNumero } from "../lib/valores-bop.js";
 import { autorizarEmision, emissionKeyConfigurada } from "../lib/emision.js";
-import { validarTransferenciaJunior } from "../lib/limite-junior.js";
+import { validarTransferenciaJunior, esJunior } from "../lib/limite-junior.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -326,10 +326,12 @@ export default async function handler(req, res) {
         if (!toAcc) return json(res, 404, { error: `Cuenta destino ${to} no encontrada` });
 
         const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
-        // Límite Junior (CNI-BANCO): 500 Pz/mes hacia/desde cuentas no-Junior,
-        // y solo organismos/entidades de La Placeta o el cotitular legal del menor.
+        // Límite Junior (CNI-BANCO): valor oficial del BOLP (CNIC-JUNIOR-LIMITE-MENSUAL,
+        // fallback 500 Pz/mes) hacia/desde cuentas no-Junior, solo organismos/entidades
+        // de La Placeta o el cotitular legal del menor.
         if (!esDemo) {
-          const v = validarTransferenciaJunior(state, from, to, Number(amount), now.slice(0, 7));
+          const limiteJunior = await leerNumero('CNIC-JUNIOR-LIMITE-MENSUAL', 500);
+          const v = validarTransferenciaJunior(state, from, to, Number(amount), now.slice(0, 7), limiteJunior);
           if (!v.ok) {
             const codigo = v.error === 'contraparte_no_permitida' ? 403 : 400;
             return json(res, codigo, v);
@@ -409,6 +411,11 @@ export default async function handler(req, res) {
         const resultados = [];
         const nuevasTx = [];
         const accountMap = new Map((state.accounts || []).map(a => [a.id, a]));
+        // Límite Junior compartido con `transferir` (CNIC-JUNIOR-LIMITE-MENSUAL).
+        const limiteJunior = await leerNumero('CNIC-JUNIOR-LIMITE-MENSUAL', 500);
+        // Acumulado por cuenta Junior dentro del propio lote (evita repartir el
+        // tope en varios movimientos pequeños que individualmente pasan).
+        const acumuladoLote = new Map();
 
         for (const item of lista) {
           const { from, to, cantidad: amount, concepto, iva, juniorDip, tutorDip } = item || {};
@@ -422,6 +429,18 @@ export default async function handler(req, res) {
           if (!toAcc) { resultados.push({ from, to, cantidad: amount, success: false, error: `Cuenta destino ${to} no encontrada` }); continue; }
 
           const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
+          if (!esDemo) {
+            const juniorId = esJunior(fromAcc) ? from : (esJunior(toAcc) ? to : null);
+            const acumuladoExtra = juniorId ? (acumuladoLote.get(juniorId) || 0) : 0;
+            const v = validarTransferenciaJunior(state, from, to, Number(amount), now.slice(0, 7), limiteJunior, acumuladoExtra);
+            if (!v.ok) {
+              resultados.push({ from, to, cantidad: amount, success: false, ...v });
+              continue;
+            }
+            if (v.juniorId) {
+              acumuladoLote.set(v.juniorId, (acumuladoLote.get(v.juniorId) || 0) + Number(amount));
+            }
+          }
           const ivaPz = Number(iva) || 0;
           const totalDebit = Number(amount);
           const suffix = esDemo ? ' (Demo)' : '';

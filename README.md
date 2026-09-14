@@ -16,6 +16,8 @@ URL base de produccion: `https://api.banco.laplaceta.org`
    - `PLACETA_APP_SECRET` o `PLACETA_API_SECRET` (`PLACETA_APP_SECRETS` permite varios separados por comas)
    - `PLACETA_ID_JWT_SECRET` o `JWT_SECRET` con el mismo secreto JWT que PlacetaID para aceptar tokens Bearer de la app movil
    - `ALLOWED_ORIGINS` opcional, separado por comas
+   - `CRM_READ_KEY`: clave compartida para el endpoint `crm-state` (lectura de estado y transferencias normales). Se envía en la cabecera `X-CRM-Key`.
+   - `BANK_EMISSION_KEY`: clave **dedicada** para emitir/quemar PLACETAS (solo administradores del RSP). Se envía en la cabecera `x-emission-key`. **Si no se configura, la emisión queda deshabilitada** (fail-closed).
 3. Deploy:
 
 ```bash
@@ -134,5 +136,8 @@ La API valida el JWT con `PLACETA_ID_JWT_SECRET`, `PLACETA_ID_JWT_SECRETS` o `JW
 `/api/state` existe solo como compatibilidad para la app: reconstruye el estado desde esas colecciones.
 
 ## Nota de seguridad
+
+- **Emisión de PLACETAS (`emitir`/`quemar`)**: usa una clave dedicada (`BANK_EMISSION_KEY`, cabecera `x-emission-key`), separada de la clave CRM compartida. No es posible emitir por la API CRM abierta ni por los flujos Junior/web.
+- **Límite Junior**: una cuenta Junior no puede recibir/enviar más de 500 Pz/mes (configurable vía CNIC `CNIC-JUNIOR-LIMITE-MENSUAL` del BOLP) hacia/desde cuentas no-Junior, y solo con organismos/entidades de La Placeta o el cotitular legal del menor.
 
 Una clave embebida en una app Android puede extraerse con ingenieria inversa. La app movil de produccion debe usar Bearer PlacetaID y dejar el secreto HMAC solo para backend/web. Para endurecer aun mas, añade Play Integrity API: la app pide un token de integridad, el servidor lo valida contra Google y solo acepta escrituras desde builds legitimas.
