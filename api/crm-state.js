@@ -1,6 +1,7 @@
 import { json, readBody } from "../lib/http.js";
 import { readBankState, writeBankState, upsertEntity, deleteEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
 import { leerNumero } from "../lib/valores-bop.js";
+import { autorizarEmision, emissionKeyConfigurada } from "../lib/emision.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -54,6 +55,12 @@ export default async function handler(req, res) {
 
       // ── Emitir Placetas ──────────────────────────────────────────────
       if (action === "emitir") {
+        // Fail-closed: la emisión de PLACETAS (oferta monetaria) requiere la
+        // clave dedicada de un administrador del RSP (BANK_EMISSION_KEY), nunca
+        // la clave CRM compartida. Sin clave configurada queda deshabilitada.
+        if (!emissionKeyConfigurada() || !autorizarEmision(req.headers["x-emission-key"])) {
+          return json(res, 403, { error: "emission_not_authorized" });
+        }
         if (!cantidad || cantidad <= 0 || !dip) return json(res, 400, { error: "Se requiere cantidad positiva y DIP" });
         const destino = (state.users || []).find(u => u.dip?.toUpperCase() === dip.toUpperCase());
         if (!destino) return json(res, 404, { error: "DIP no encontrado" });
@@ -74,6 +81,10 @@ export default async function handler(req, res) {
 
       // ── Quemar Placetas ──────────────────────────────────────────────
       if (action === "quemar") {
+        // Igual que emitir: destruir oferta monetaria exige la clave dedicada.
+        if (!emissionKeyConfigurada() || !autorizarEmision(req.headers["x-emission-key"])) {
+          return json(res, 403, { error: "emission_not_authorized" });
+        }
         if (!cantidad || cantidad <= 0 || !cuentaId) return json(res, 400, { error: "Se requiere cantidad positiva y cuentaId" });
         const c = (state.accounts || []).find(a => a.id === cuentaId);
         if (!c) return json(res, 404, { error: "Cuenta no encontrada" });
