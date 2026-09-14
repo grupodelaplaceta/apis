@@ -2,6 +2,7 @@ import { json, readBody } from "../lib/http.js";
 import { readBankState, writeBankState, upsertEntity, deleteEntity, readTreasuryConfig, writeTreasuryConfig } from "../lib/bankCollections.js";
 import { leerNumero } from "../lib/valores-bop.js";
 import { autorizarEmision, emissionKeyConfigurada } from "../lib/emision.js";
+import { validarTransferenciaJunior } from "../lib/limite-junior.js";
 import crypto from "crypto";
 
 const CRM_KEY = process.env.CRM_READ_KEY || '';
@@ -325,6 +326,15 @@ export default async function handler(req, res) {
         if (!toAcc) return json(res, 404, { error: `Cuenta destino ${to} no encontrada` });
 
         const esDemo = tutorDip === '11111111D' || (juniorDip || '').includes('DEMO') || (from || '').includes('DEMO') || (to || '').includes('DEMO');
+        // Límite Junior (CNI-BANCO): 500 Pz/mes hacia/desde cuentas no-Junior,
+        // y solo organismos/entidades de La Placeta o el cotitular legal del menor.
+        if (!esDemo) {
+          const v = validarTransferenciaJunior(state, from, to, Number(amount), now.slice(0, 7));
+          if (!v.ok) {
+            const codigo = v.error === 'contraparte_no_permitida' ? 403 : 400;
+            return json(res, codigo, v);
+          }
+        }
         const ivaPz = Number(iva) || 0;
         const totalDebit = Number(amount);
         const suffix = esDemo ? ' (Demo)' : '';
