@@ -287,6 +287,14 @@ export default async function handler(req, res) {
         // fallback 750 Pz si el boletín no está disponible.
         const amountPz = Math.round(await leerNumero('CNIC-BONO-BIENVENIDA-JUNIOR-BASICA', 750));
 
+        // Es una transferencia (AGLDP → Junior), no emisión: aplica el límite
+        // Junior y el whitelist igual que `transferir`.
+        if (!esDemo) {
+          const limiteJunior = await leerNumero('CNIC-JUNIOR-LIMITE-MENSUAL', 500);
+          const v = validarTransferenciaJunior(state, 'AGLDP', juniorAccountId, amountPz, now.slice(0, 7), limiteJunior);
+          if (!v.ok) return json(res, v.error === 'contraparte_no_permitida' ? 403 : 400, v);
+        }
+
         if (!esDemo && (from.balancePz || 0) < amountPz) {
           return json(res, 400, { error: "Saldo insuficiente en AGLDP" });
         }
@@ -504,6 +512,12 @@ export default async function handler(req, res) {
           return json(res, 400, { error: `Saldo insuficiente en cuenta admin ${from}: tiene ${fromAcc.balancePz}` });
         }
 
+        // Transferencia (admin → titular): si toca una cuenta Junior aplica el
+        // límite mensual y el whitelist.
+        const limiteJuniorRegalia = await leerNumero('CNIC-JUNIOR-LIMITE-MENSUAL', 500);
+        const vRegalia = validarTransferenciaJunior(state, from, to, Number(amount), now.slice(0, 7), limiteJuniorRegalia);
+        if (!vRegalia.ok) return json(res, vRegalia.error === 'contraparte_no_permitida' ? 403 : 400, vRegalia);
+
         const finalKind = kind === "PLJUNIOR_PAYMENT" ? "PLJUNIOR_PAYMENT" : "Royalty";
         const txId = uuid();
         const tx = {
@@ -578,6 +592,14 @@ export default async function handler(req, res) {
 
         const esDemo = String(dip).includes("DEMO") || cd.id.includes("DEMO");
         const suffix = esDemo ? " (Demo)" : "";
+
+        // Transferencia (FUND-BLP → beneficiario): si el beneficiario es una
+        // cuenta Junior aplica el límite mensual y el whitelist.
+        if (!esDemo) {
+          const limiteJuniorRetrib = await leerNumero('CNIC-JUNIOR-LIMITE-MENSUAL', 500);
+          const vRetrib = validarTransferenciaJunior(state, "FUND-BLP", cd.id, importe, now.slice(0, 7), limiteJuniorRetrib);
+          if (!vRetrib.ok) return json(res, vRetrib.error === 'contraparte_no_permitida' ? 403 : 400, vRetrib);
+        }
 
         if (!esDemo && (fondo.balancePz || 0) < importe) {
           return json(res, 400, { error: `Saldo insuficiente en el Fondo de Apoyo: tiene ${fondo.balancePz} Pz, necesita ${importe} Pz` });
