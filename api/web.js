@@ -313,12 +313,15 @@ export default async function handler(req, res) {
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
       const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const cuenta = url.searchParams.get("cuenta") || "";
+      const cuentaValida = !!cuenta && accountIds.has(cuenta);
       const movs = (state.transactions || [])
         .filter(
           (t) =>
             t &&
             (accountIds.has(t.fromAccountId) || accountIds.has(t.toAccountId))
         )
+        .filter((t) => !cuentaValida || t.fromAccountId === cuenta || t.toAccountId === cuenta)
         .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
         .slice(0, limit)
         .map((t) => ({
@@ -331,7 +334,7 @@ export default async function handler(req, res) {
           concept: t.concept || t.note || "",
           status: t.status || "Settled",
           createdAt: t.createdAt || null,
-          esEntrada: accountIds.has(t.toAccountId)
+          esEntrada: cuentaValida ? t.toAccountId === cuenta : accountIds.has(t.toAccountId)
         }));
       return json(res, 200, { movimientos: movs });
     }
@@ -341,8 +344,11 @@ export default async function handler(req, res) {
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const cuenta = url.searchParams.get("cuenta") || "";
+      const cuentaValida = !!cuenta && accountIds.has(cuenta);
       const cards = (state.digitalCards || [])
         .filter((c) => c && accountIds.has(c.accountId))
+        .filter((c) => !cuentaValida || c.accountId === cuenta)
         .map((c) => ({
           id: c.id,
           accountId: c.accountId,
