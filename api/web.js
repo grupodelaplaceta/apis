@@ -11,6 +11,7 @@ import { assertPlacetaIdBearer } from "../lib/security.js";
 import { readBankState, upsertEntity } from "../lib/bankCollections.js";
 import { buscarTitularPorDip, esCuentaPersonalViva, esDipValido, registrarTitularPorPlacetaId } from "../lib/registroPlacetaId.js";
 import * as N from "../lib/nominas.js";
+import * as T from "../lib/tributos.js";
 import crypto from "crypto";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
@@ -262,6 +263,27 @@ export default async function handler(req, res) {
         soyEmpresa: contratos.some((c) => accountIds.has(c.companyAccountId)),
         soyEmpleado: contratos.some((c) => String(c.employeeDip || "").toUpperCase() === dip)
       });
+    }
+
+    // Declaraciones tributarias del titular (IRM/IGF) y de sus empresas (EIP).
+    if (req.method === "GET" && path === "/api/web/tributos") {
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      const [propias, porPlaceta] = await Promise.all([
+        T.listDeclarationsForContributor({ dip }),
+        T.listDeclarationsForContributor({ placetaId: owner.placetaId })
+      ]);
+      const vistos = new Set();
+      const declaraciones = [...propias, ...porPlaceta].filter((d) => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+      const empresas = [];
+      for (const emp of empresasDelOwner(owner)) {
+        const contrib = await T.findContributorByEip(emp.eip);
+        const decl = contrib ? await T.listDeclarationsForContributor({ placetaId: contrib.placeta_id }) : [];
+        empresas.push({ eip: emp.eip, nombre: emp.nombre, declaraciones: decl });
+      }
+      return json(res, 200, { declaraciones, empresas });
     }
 
     if (req.method === "GET" && path === "/api/web/movimientos") {
