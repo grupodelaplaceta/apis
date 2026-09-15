@@ -244,7 +244,9 @@ export default async function handler(req, res) {
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const dip = dipNormalizadoDe(req.placetaIdUser);
       const accountIds = new Set(owner.accounts.map((a) => a.id));
-      const estado = await N.estadoNominas({});
+      let estado;
+      try { estado = await N.estadoNominas({}); }
+      catch { estado = { config: {}, periodo: "", fechaLimite: null, plazoVencido: false, contratos: [], resumenes: [], periodos: [] }; }
       const esMio = (c) => String(c.employeeDip || "").toUpperCase() === dip || accountIds.has(c.companyAccountId);
       const contratos = (estado.contratos || []).filter(esMio);
       const ids = new Set(contratos.map((c) => c.id));
@@ -271,18 +273,21 @@ export default async function handler(req, res) {
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const dip = dipNormalizadoDe(req.placetaIdUser);
-      const [propias, porPlaceta] = await Promise.all([
-        T.listDeclarationsForContributor({ dip }),
-        T.listDeclarationsForContributor({ placetaId: owner.placetaId })
-      ]);
-      const vistos = new Set();
-      const declaraciones = [...propias, ...porPlaceta].filter((d) => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+      let declaraciones = [];
       const empresas = [];
-      for (const emp of empresasDelOwner(owner)) {
-        const contrib = await T.findContributorByEip(emp.eip);
-        const decl = contrib ? await T.listDeclarationsForContributor({ placetaId: contrib.placeta_id }) : [];
-        empresas.push({ eip: emp.eip, nombre: emp.nombre, declaraciones: decl });
-      }
+      try {
+        const [propias, porPlaceta] = await Promise.all([
+          T.listDeclarationsForContributor({ dip }),
+          T.listDeclarationsForContributor({ placetaId: owner.placetaId })
+        ]);
+        const vistos = new Set();
+        declaraciones = [...propias, ...porPlaceta].filter((d) => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+        for (const emp of empresasDelOwner(owner)) {
+          const contrib = await T.findContributorByEip(emp.eip);
+          const decl = contrib ? await T.listDeclarationsForContributor({ placetaId: contrib.placeta_id }) : [];
+          empresas.push({ eip: emp.eip, nombre: emp.nombre, declaraciones: decl });
+        }
+      } catch { /* sin registros tributarios: devolvemos vacío */ }
       return json(res, 200, { declaraciones, empresas });
     }
 
