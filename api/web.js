@@ -165,13 +165,39 @@ function accountToView(a) {
 
 export default async function handler(req, res) {
   try {
+    // Los navegadores y proxies pueden comprobar el endpoint con OPTIONS antes
+    // de la petición real. Debe responder sin autenticación ni 405.
+    if (req.method === "OPTIONS") {
+      res.statusCode = 204;
+      res.setHeader("Allow", "GET, POST, OPTIONS");
+      res.setHeader("Cache-Control", "no-store");
+      return res.end();
+    }
+
     // Autenticación: exige Bearer PlacetaID válido -> req.placetaIdUser.dip
     if (!(await assertPlacetaIdBearer(req, res))) {
       return json(res, 401, { error: "auth_required" });
     }
 
     const url = new URL(req.url, "https://api.local");
-    const path = url.pathname.replace(/\/+$/, "") || "/";
+    let path = url.pathname.replace(/\/+$/, "") || "/";
+    // Compatibilidad con clientes antiguos que usaban singular o guion.
+    const aliases = {
+      "/api/web/nomina": "/api/web/nominas",
+      "/api/web/tributo": "/api/web/tributos",
+      "/api/web/subvencion": "/api/web/subvenciones",
+      "/api/web/place-zum": "/api/web/placezum"
+    };
+    path = aliases[path] || path;
+
+    // Ayuda de endpoint para evitar que un cliente mal configurado reciba un
+    // 405 opaco al consultar accidentalmente /api/web sin recurso.
+    if (req.method === "GET" && path === "/api/web") {
+      return json(res, 200, {
+        ok: true,
+        endpoints: ["cuenta", "registro", "movimientos", "tarjetas", "gestores", "cumplimiento", "nominas", "tributos", "facturacion", "inversiones", "subvenciones", "placezum", "transferencia"]
+      });
+    }
 
     // ── Alta por DIP de PlacetaID ─────────────────────────────────────────
     // Cualquier DIP válido de PlacetaID puede registrarse en el banco por sí
