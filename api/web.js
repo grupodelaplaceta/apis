@@ -297,6 +297,16 @@ export default async function handler(req, res) {
       return json(res, 200, { holdings, operaciones });
     }
 
+    // Subvenciones del titular (solicitudes recibidas por sus cuentas).
+    if (req.method === "GET" && path === "/api/web/subvenciones") {
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const solicitudes = (state.subsidyRequests || []).filter((s) => s && accountIds.has(s.targetAccountId));
+      return json(res, 200, { solicitudes });
+    }
+
     if (req.method === "GET" && path === "/api/web/movimientos") {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
