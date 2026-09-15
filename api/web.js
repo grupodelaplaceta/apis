@@ -286,6 +286,17 @@ export default async function handler(req, res) {
       return json(res, 200, { declaraciones, empresas });
     }
 
+    // Cartera de inversiones del titular (holdings y operaciones).
+    if (req.method === "GET" && path === "/api/web/inversiones") {
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const holdings = (state.investmentHoldings || []).filter((h) => h && accountIds.has(h.accountId));
+      const operaciones = (state.investmentOperations || []).filter((o) => o && accountIds.has(o.accountId));
+      return json(res, 200, { holdings, operaciones });
+    }
+
     if (req.method === "GET" && path === "/api/web/movimientos") {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
