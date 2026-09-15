@@ -5,7 +5,7 @@
     }
   },
   "rewrites": [
-    { "source": "/api/web/:path*", "destination": "/api/web" }
+    { "source": "/api/web/:path*", "destination": "/api/web?route=:path*" }
   ],
   "headers": [
     {

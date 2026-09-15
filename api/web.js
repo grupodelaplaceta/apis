@@ -180,7 +180,22 @@ export default async function handler(req, res) {
     }
 
     const url = new URL(req.url, "https://api.local");
-    let path = url.pathname.replace(/\/+$/, "") || "/";
+    const rawPath = url.pathname.replace(/\/+$/, "") || "/";
+    // Vercel puede entregar al serverless function la URL del destino del
+    // rewrite (/api/web) en lugar de la ruta original. El rewrite añade
+    // `route`; los headers cubren despliegues antiguos y proxies intermedios.
+    const routeQuery = String(url.searchParams.get("route") || "").replace(/^\/+|\/+$/g, "");
+    const originalHeader = String(
+      req.headers["x-vercel-original-url"] ||
+      req.headers["x-invoke-path"] ||
+      req.headers["x-matched-path"] ||
+      req.headers["x-original-url"] ||
+      ""
+    );
+    const headerPath = originalHeader ? originalHeader.split("?")[0].replace(/\/+$/, "") : "";
+    let path = routeQuery
+      ? `/api/web/${routeQuery}`
+      : (headerPath.startsWith("/api/web/") ? headerPath : rawPath);
     // Compatibilidad con clientes antiguos que usaban singular o guion.
     const aliases = {
       "/api/web/nomina": "/api/web/nominas",
