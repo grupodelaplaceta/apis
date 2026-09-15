@@ -10,6 +10,7 @@ import { json, methodNotAllowed, readBody } from "../lib/http.js";
 import { assertPlacetaIdBearer } from "../lib/security.js";
 import { readBankState, upsertEntity } from "../lib/bankCollections.js";
 import { buscarTitularPorDip, esCuentaPersonalViva, esDipValido, registrarTitularPorPlacetaId } from "../lib/registroPlacetaId.js";
+import * as N from "../lib/nominas.js";
 import crypto from "crypto";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
@@ -231,6 +232,35 @@ export default async function handler(req, res) {
           registrado: owner.registrado
         },
         cuentas: owner.accounts.map(accountToView)
+      });
+    }
+
+    // Nóminas del titular (solo lectura): como empleado (por DIP) o como
+    // empresa/gestor (por cuentas Business). Nunca se exponen nóminas ajenas.
+    if (req.method === "GET" && path === "/api/web/nominas") {
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const estado = await N.estadoNominas({});
+      const esMio = (c) => String(c.employeeDip || "").toUpperCase() === dip || accountIds.has(c.companyAccountId);
+      const contratos = (estado.contratos || []).filter(esMio);
+      const ids = new Set(contratos.map((c) => c.id));
+      const resumenes = (estado.resumenes || []).filter((r) => ids.has(r.contrato?.id));
+      const periodos = (estado.periodos || []).filter(
+        (p) => ids.has(p.contractId) || accountIds.has(p.companyAccountId) || String(p.employeeDip || "").toUpperCase() === dip
+      );
+      return json(res, 200, {
+        config: estado.config,
+        periodo: estado.periodo,
+        fechaLimite: estado.fechaLimite,
+        plazoVencido: estado.plazoVencido,
+        contratos,
+        resumenes,
+        periodos,
+        soyEmpresa: contratos.some((c) => accountIds.has(c.companyAccountId)),
+        soyEmpleado: contratos.some((c) => String(c.employeeDip || "").toUpperCase() === dip)
       });
     }
 
