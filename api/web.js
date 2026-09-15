@@ -73,6 +73,29 @@ function findAccountByIbanOrId(state, to) {
   );
 }
 
+// ── PlaceZUM: código de pago temporal (5 dígitos, caduca en 2 min) ─────
+// Misma lógica que la app Android (EconomyEngine.generatePlacezumCode): un
+// código derivado del IBAN + ventana de 120 s. Se replica el overflow de
+// entero de 32 bits de Kotlin con `| 0` para que web y app generen el mismo
+// código.
+function generatePlacezumCode(account, nowMs = Date.now()) {
+  const window = Math.floor(nowMs / 1000 / 120);
+  const seed = `${account.iban || account.id}${window}`;
+  let raw = 0;
+  for (const ch of seed) raw = (raw * 31 + ch.charCodeAt(0)) | 0;
+  const code = String(Math.abs(raw) % 100000).padStart(5, "0");
+  return { code, accountId: account.id, iban: account.iban || account.id, expiresAt: new Date(nowMs + 120000).toISOString() };
+}
+
+function findAccountByPlacezumCode(state, codeText, nowMs = Date.now()) {
+  const clean = String(codeText || "").replace(/\D/g, "");
+  if (clean.length !== 5) return null;
+  return (state.accounts || []).find((a) => a && (
+    generatePlacezumCode(a, nowMs).code === clean ||
+    generatePlacezumCode(a, nowMs - 120000).code === clean
+  )) || null;
+}
+
 // ── Helpers de enmascarado (nunca mostrar datos completos sensibles) ───────
 function maskIban(iban) {
   if (!iban) return "";
@@ -516,63 +539,59 @@ export default async function handler(req, res) {
       });
     }
 
-    // ── PlaceZUM: envío de Placetas a varios destinatarios en un solo zum ──
-    // Body: { from, destinatarios: [{ to, cantidad, concepto? }] }
-    // Crea una operación PENDIENTE por destinatario agrupada bajo un zunId.
-    if (req.method === "POST" && path === "/api/web/placezum") {
+    // ── PlaceZUM: código de pago temporal (igual que la app) ───────────
+    // POST /api/web/placezum/codigo → genera el código del titular
+    // POST /api/web/placezum/pagar  → paga introduciendo un código ajeno
+    if (req.method === "POST" && path === "/api/web/placezum/codigo") {
       const body = JSON.parse((await readBody(req)) || "{}");
-      const { from, destinatarios } = body;
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const account = owner.accounts.find((a) => a.id === body.from) || owner.accounts[0];
+      if (!account) return json(res, 404, { error: "cuenta_no_encontrada" });
+      const codigo = generatePlacezumCode(account);
+      return json(res, 200, { ok: true, codigo });
+    }
 
+    if (req.method === "POST" && path === "/api/web/placezum/pagar") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { from, codigo, cantidad, concepto } = body;
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const fromAcc = owner.accounts.find((a) => a.id === from);
-      if (!fromAcc) return json(res, 403, { error: "No puedes enviar desde una cuenta que no es tuya" });
-
-      const lista = Array.isArray(destinatarios) ? destinatarios : [];
-      if (lista.length < 1 || lista.length > 100) return json(res, 400, { error: "Indica entre 1 y 100 destinatarios" });
-
-      let total = 0;
-      const validados = [];
-      for (const d of lista) {
-        const toAcc = findAccountByIbanOrId(state, d.to);
-        if (!toAcc) return json(res, 404, { error: `Destino no encontrado: ${d.to}` });
-        if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
-          return json(res, 400, { error: "No puedes enviar a la misma cuenta" });
-        }
-        const amount = Math.round(Number(d.cantidad));
-        if (!Number.isFinite(amount) || amount <= 0) return json(res, 400, { error: "Cantidad inválida" });
-        total += amount;
-        validados.push({ to: toAcc.id, amount, concepto: String(d.concepto || "PlaceZUM").trim() });
+      if (!fromAcc) return json(res, 403, { error: "No puedes pagar desde una cuenta que no es tuya" });
+      const toAcc = findAccountByPlacezumCode(state, codigo);
+      if (!toAcc) return json(res, 404, { error: "Código PlaceZUM no localizado o caducado" });
+      if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
+        return json(res, 400, { error: "No puedes pagarte a ti mismo" });
       }
-      if ((fromAcc.balancePz ?? 0) < total) {
-        return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: total });
+      const amount = Math.round(Number(cantidad));
+      if (!Number.isFinite(amount) || amount <= 0) return json(res, 400, { error: "Cantidad inválida" });
+      if ((fromAcc.balancePz ?? 0) < amount) {
+        return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: amount });
       }
 
+      const cleanCode = String(codigo || "").replace(/\D/g, "");
       const now = new Date().toISOString();
-      const zunId = `zum-${crypto.randomBytes(6).toString("hex")}`;
-      const creados = [];
-      for (const v of validados) {
-        const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
-        const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
-        await upsertEntity("bank_transactions", pendingId, {
-          id: pendingId, kind: "Transfer", fromAccountId: from, toAccountId: v.to,
-          amountPz: v.amount, ivaPz: 0, netAmount: v.amount, taxAmount: 0,
-          concept: v.concepto || "PlaceZUM (pendiente de firma)", status: "Pending",
-          firmaRequerida: true, executionCode, source: "banco-web", zunId,
-          createdAt: now, updatedAt: now, IBAN_Origin: fromAcc.iban || ""
-        });
-        creados.push({ id: pendingId, to: v.to, amountPz: v.amount, executionCode });
-      }
+      const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
+      const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
+      await upsertEntity("bank_transactions", pendingId, {
+        id: pendingId, kind: "Placezum", fromAccountId: from, toAccountId: toAcc.id,
+        amountPz: amount, ivaPz: 0, netAmount: amount, taxAmount: 0,
+        concept: `${concepto || "Pago PlaceZUM"} · Código ${cleanCode}`, status: "Pending",
+        firmaRequerida: true, executionCode, source: "banco-web",
+        createdAt: now, updatedAt: now, IBAN_Origin: fromAcc.iban || ""
+      });
       return json(res, 201, {
         ok: true,
         placezum: {
-          id: zunId,
-          total,
-          enviados: creados.length,
+          id: pendingId,
           estado: "Pending",
-          mensaje: `Envío PlaceZUM de ${total} Pz a ${creados.length} destinatario(s). Confírmalo en PlacetaID Móvil.`,
-          destinatarios: creados
+          executionCode,
+          amountPz: amount,
+          destinatario: toAcc.displayName || toAcc.id,
+          mensaje: `Pago PlaceZUM de ${amount} Pz registrado. Confírmalo en PlacetaID Móvil para ejecutarlo.`
         }
       });
     }
