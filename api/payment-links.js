@@ -7,14 +7,25 @@ import { config } from "../lib/config.js";
 
 export default async function handler(req, res) {
   try {
-    if (req.method !== "POST") {
-      return methodNotAllowed(res, ["POST"]);
+    const isPublicLookup = req.method === "GET";
+    if (!isPublicLookup && req.method !== "POST") {
+      return methodNotAllowed(res, ["GET", "POST"]);
     }
 
-    const body = await readBody(req);
-    await assertRequestAllowed(req, res, body);
+    // La consulta pública de un enlace firmado no requiere sesión. La firma
+    // ya es el permiso de lectura y evita exponer cuentas o importes
+    // manipulados. Crear y pagar siguen requiriendo la autenticación habitual.
+    const body = isPublicLookup ? "" : await readBody(req);
+    if (!isPublicLookup) await assertRequestAllowed(req, res, body);
 
-    const payload = JSON.parse(body || "{}");
+    const query = new URL(req.url, "https://api.local").searchParams;
+    const payload = isPublicLookup
+      ? { paymentLinkId: query.get("id"), signature: query.get("signature") }
+      : JSON.parse(body || "{}");
+
+    if (isPublicLookup && (!payload.paymentLinkId || !payload.signature)) {
+      return json(res, 400, { error: "invalid_payment_link" });
+    }
 
     // ── Verificar pago (verify-payment) ────────────────────────────────
     if (payload.paymentLinkId && payload.signature) {
@@ -36,7 +47,9 @@ export default async function handler(req, res) {
       const secret = config.appSecrets()[0] || "gdlp-secure-payment-key";
       const sigPayload = [link.id, link.kind, link.creatorAccountId, link.amountPz, link.ivaPz, link.totalPz].join(":");
       const expected = crypto.createHmac("sha256", secret).update(sigPayload, "utf8").digest("hex");
-      if (!crypto.timingSafeEqual(Buffer.from(signature, "hex"), Buffer.from(expected, "hex"))) {
+      const provided = Buffer.from(String(signature), "hex");
+      const expectedBuffer = Buffer.from(expected, "hex");
+      if (provided.length !== expectedBuffer.length || !crypto.timingSafeEqual(provided, expectedBuffer)) {
         return json(res, 403, {
           error: "invalid_signature_link_tampered", developerCode: "BPL-PAY-VER-005",
           message: "Este enlace de pago no es válido o ha sido manipulado."
@@ -45,7 +58,7 @@ export default async function handler(req, res) {
       return json(res, 200, {
         ok: true,
         link: {
-          id: link.id, kind: link.kind, creatorAccountId: link.creatorAccountId,
+          id: link.id, kind: link.kind,
           targetIban: link.targetIban, amountPz: link.amountPz, ivaPz: link.ivaPz,
           totalPz: link.totalPz, concept: link.concept, status: link.status, createdAt: link.createdAt
         }
