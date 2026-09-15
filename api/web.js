@@ -90,7 +90,11 @@ function generatePlacezumCode(account, nowMs = Date.now()) {
 function findAccountByPlacezumCode(state, codeText, nowMs = Date.now()) {
   const clean = String(codeText || "").replace(/\D/g, "");
   if (clean.length !== 5) return null;
+  // Igual que la app (EconomyEngine.payWithPlacezumCode): solo se puede pagar
+  // a cuentas ciudadanas (CITIZEN), nunca a cuentas de empresa/sistema.
   return (state.accounts || []).find((a) => a && (
+    String(a.kind || "CITIZEN").toUpperCase() === "CITIZEN"
+  ) && (
     generatePlacezumCode(a, nowMs).code === clean ||
     generatePlacezumCode(a, nowMs - 120000).code === clean
   )) || null;
