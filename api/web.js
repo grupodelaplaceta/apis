@@ -484,6 +484,67 @@ export default async function handler(req, res) {
       });
     }
 
+    // ── PlaceZUM: envío de Placetas a varios destinatarios en un solo zum ──
+    // Body: { from, destinatarios: [{ to, cantidad, concepto? }] }
+    // Crea una operación PENDIENTE por destinatario agrupada bajo un zunId.
+    if (req.method === "POST" && path === "/api/web/placezum") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { from, destinatarios } = body;
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+
+      const fromAcc = owner.accounts.find((a) => a.id === from);
+      if (!fromAcc) return json(res, 403, { error: "No puedes enviar desde una cuenta que no es tuya" });
+
+      const lista = Array.isArray(destinatarios) ? destinatarios : [];
+      if (lista.length < 1 || lista.length > 100) return json(res, 400, { error: "Indica entre 1 y 100 destinatarios" });
+
+      let total = 0;
+      const validados = [];
+      for (const d of lista) {
+        const toAcc = findAccountByIbanOrId(state, d.to);
+        if (!toAcc) return json(res, 404, { error: `Destino no encontrado: ${d.to}` });
+        if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
+          return json(res, 400, { error: "No puedes enviar a la misma cuenta" });
+        }
+        const amount = Math.round(Number(d.cantidad));
+        if (!Number.isFinite(amount) || amount <= 0) return json(res, 400, { error: "Cantidad inválida" });
+        total += amount;
+        validados.push({ to: toAcc.id, amount, concepto: String(d.concepto || "PlaceZUM").trim() });
+      }
+      if ((fromAcc.balancePz ?? 0) < total) {
+        return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: total });
+      }
+
+      const now = new Date().toISOString();
+      const zunId = `zum-${crypto.randomBytes(6).toString("hex")}`;
+      const creados = [];
+      for (const v of validados) {
+        const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
+        const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
+        await upsertEntity("bank_transactions", pendingId, {
+          id: pendingId, kind: "Transfer", fromAccountId: from, toAccountId: v.to,
+          amountPz: v.amount, ivaPz: 0, netAmount: v.amount, taxAmount: 0,
+          concept: v.concepto || "PlaceZUM (pendiente de firma)", status: "Pending",
+          firmaRequerida: true, executionCode, source: "banco-web", zunId,
+          createdAt: now, updatedAt: now, IBAN_Origin: fromAcc.iban || ""
+        });
+        creados.push({ id: pendingId, to: v.to, amountPz: v.amount, executionCode });
+      }
+      return json(res, 201, {
+        ok: true,
+        placezum: {
+          id: zunId,
+          total,
+          enviados: creados.length,
+          estado: "Pending",
+          mensaje: `Envío PlaceZUM de ${total} Pz a ${creados.length} destinatario(s). Confírmalo en PlacetaID Móvil.`,
+          destinatarios: creados
+        }
+      });
+    }
+
     // ── Facturación: facturas del mes de TUS empresas + IVA pendiente ──
     // Solo lectura (RSP es el origen de verdad). Se devuelven las facturas
     // de las cuentas Business del titular/gestor (regla de oro: solo lo tuyo).
