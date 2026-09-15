@@ -66,6 +66,62 @@ console.log("5) Saldo insuficiente en la liquidación → transacción rechazada
   const out = reconcileIncomingState(current, { accounts: [A, B, TGLP], transactions: [settled], auditLogs: [] }, NOW);
   check("no se aplica (a=100)", bal(out, "a") === 100, `a=${bal(out, "a")}`);
   check("queda auditado como rechazo", out.auditLogs.some((x) => x.reason === "source_insufficient_balance"), `reasons=${out.auditLogs.map((x) => x.reason).join(",")}`);
+  check("no queda Pending engañoso", out.transactions.find((t) => t.id === "tx-x")?.status === "Cancelled", JSON.stringify(out.transactions.find((t) => t.id === "tx-x")));
+  check("la cancelación conserva el motivo", out.transactions.find((t) => t.id === "tx-x")?.cancellationReason === "source_insufficient_balance", JSON.stringify(out.transactions.find((t) => t.id === "tx-x")));
+}
+
+console.log("6) Pending sin fondos se cancela, también para inversiones:");
+{
+  const investment = {
+    id: "tx-investment-no-funds",
+    kind: "InvestmentBuy",
+    fromAccountId: "b",
+    toAccountId: "b",
+    amountPz: 50,
+    ivaPz: 0,
+    status: "Pending",
+    createdAt: NOW
+  };
+  const out = reconcileIncomingState(
+    { accounts: [A, B, TGLP], transactions: [], auditLogs: [] },
+    { accounts: [A, B, TGLP], transactions: [investment], auditLogs: [] },
+    NOW
+  );
+  const saved = out.transactions.find((t) => t.id === investment.id);
+  check("se registra como Cancelled", saved?.status === "Cancelled", JSON.stringify(saved));
+  check("motivo explícito de falta de fondos", saved?.cancellationReason === "source_insufficient_balance", JSON.stringify(saved));
+  check("no altera saldos", bal(out, "b") === 0, `b=${bal(out, "b")}`);
+}
+
+console.log("7) Impuesto dependiente de transferencia fantasma se revierte:");
+{
+  const principal = { id: "tx-phantom", kind: "Transfer", fromAccountId: "a", toAccountId: "b", amountPz: 999, ivaPz: 0, status: "Settled", createdAt: NOW, IBAN_Origin: A.iban };
+  const iva = { id: "tx-phantom-iva", kind: "Tax", fromAccountId: "a", toAccountId: "TGLP", amountPz: 50, ivaPz: 0, taxAmount: 0, status: "Settled", originalTransactionId: "tx-phantom", createdAt: NOW };
+  const out = reconcileIncomingState(
+    { accounts: [A, B, TGLP], transactions: [], auditLogs: [] },
+    { accounts: [A, B, TGLP], transactions: [iva, principal], auditLogs: [] },
+    NOW
+  );
+  const main = out.transactions.find((t) => t.id === principal.id);
+  const side = out.transactions.find((t) => t.id === iva.id);
+  check("transferencia fantasma cancelada", main?.status === "Cancelled", JSON.stringify(main));
+  check("impuesto huérfano cancelado", side?.status === "Cancelled", JSON.stringify(side));
+  check("no se cobra impuesto ni se mueven saldos", bal(out, "a") === 100 && bal(out, "TGLP") === 0, `a=${bal(out, "a")} tglp=${bal(out, "TGLP")}`);
+  check("queda auditoría de rechazo/reversión", out.auditLogs.some((x) => x.action === "reverted_orphaned_transaction" || x.action === "rejected_transaction"), JSON.stringify(out.auditLogs));
+}
+
+console.log("8) Un impuesto ya guardado sobre una transferencia cancelada se revierte:");
+{
+  const cancelled = { id: "tx-cancelled", kind: "Transfer", fromAccountId: "a", toAccountId: "b", amountPz: 999, status: "Cancelled", cancellationReason: "source_insufficient_balance", createdAt: NOW };
+  const iva = { id: "tx-cancelled-iva", kind: "Tax", fromAccountId: "a", toAccountId: "TGLP", amountPz: 50, status: "Settled", originalTransactionId: "tx-cancelled", createdAt: NOW };
+  const out = reconcileIncomingState(
+    { accounts: [{ ...A, balancePz: 50 }, B, { ...TGLP, balancePz: 50 }], transactions: [cancelled, iva], auditLogs: [] },
+    { accounts: [{ ...A, balancePz: 50 }, B, { ...TGLP, balancePz: 50 }], transactions: [cancelled, iva], auditLogs: [] },
+    NOW
+  );
+  check("impuesto guardado queda cancelado", out.transactions.find((t) => t.id === iva.id)?.status === "Cancelled", JSON.stringify(out.transactions));
+  check("se devuelve el importe al origen", bal(out, "a") === 100 && bal(out, "TGLP") === 0, `a=${bal(out, "a")} tglp=${bal(out, "TGLP")}`);
+  check("se registra la reversión", out.auditLogs.some((x) => x.action === "reverted_orphaned_transaction"), JSON.stringify(out.auditLogs));
 }
 
 console.log(`\nResultado: ${pass} OK, ${fail} FAIL`);
