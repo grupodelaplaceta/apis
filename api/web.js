@@ -343,10 +343,18 @@ export default async function handler(req, res) {
       const dipBuscado = String(url.searchParams.get("dip") || "").trim().toUpperCase();
       if (!dipBuscado) return json(res, 400, { error: "dip_requerido" });
       const state = await readBankState();
-      const cuentas = (state.accounts || [])
+      // Igual que la app: resuelve el DIP canónico y sus alias mediante el
+      // registro de PlacetaID, y después localiza la cuenta personal corriente.
+      const identidad = buscarTitularPorDip(state, dipBuscado);
+      const cuentasEncontradas = identidad.cuentas?.length
+        ? identidad.cuentas
+        : (state.accounts || []).filter((account) => {
+          const titular = String(account.titularDip || account.dip || account.placetaId || "").trim().toUpperCase();
+          return titular === dipBuscado || titular === `DIP-${dipBuscado}` || titular === `PLID-${dipBuscado}`;
+        });
+      const cuentas = cuentasEncontradas
         .filter((account) => String(account.type || "").toLowerCase() === "current")
-        .filter((account) => String(account.titularDip || account.dip || account.placetaId || "").trim().toUpperCase() === dipBuscado)
-        .map((account) => ({ id: account.id, displayName: account.displayName || "Trabajador", employeeDip: dipBuscado, type: account.type, iban: maskIban(account.iban) }));
+        .map((account) => ({ id: account.id, displayName: account.displayName || identidad.usuario?.displayName || "Trabajador", employeeDip: dipBuscado, type: account.type, iban: maskIban(account.iban) }));
       return json(res, 200, { cuentas });
     }
 
@@ -373,9 +381,9 @@ export default async function handler(req, res) {
       const employee = (state.accounts || []).find((account) => account.id === employeeAccountId);
       if (!employee) return json(res, 404, { error: "Cuenta del trabajador no encontrada" });
       if (String(employee.type || "").toLowerCase() !== "current") return json(res, 400, { error: "El trabajador debe tener una cuenta personal corriente" });
-      if (String(employee.titularDip || employee.dip || employee.placetaId || "").trim().toUpperCase() !== employeeDip) {
-        return json(res, 400, { error: "La cuenta del trabajador no corresponde al DIP indicado" });
-      }
+      const employeeIdentity = String(employee.titularDip || employee.dip || employee.placetaId || "").trim().toUpperCase();
+      const employeeMatches = employeeIdentity === employeeDip || employeeIdentity === `DIP-${employeeDip}` || employeeIdentity === `PLID-${employeeDip}`;
+      if (!employeeMatches) return json(res, 400, { error: "La cuenta del trabajador no corresponde al DIP indicado" });
       const contrato = await N.guardarContrato({
         companyAccountId,
         eip,
