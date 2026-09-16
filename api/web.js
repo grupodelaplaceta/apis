@@ -360,7 +360,7 @@ export default async function handler(req, res) {
       const payrollAccountIds = selectedEips.size > 0 ? eipAccountIds : accountIds;
       const scopedDips = new Set(scopedAccounts.flatMap((a) => [a.dip, a.titularDip, a.placetaId].filter(Boolean)).map((value) => String(value).toUpperCase()));
       let estado;
-      try { estado = await N.estadoNominas({}); }
+      try { estado = await N.estadoNominas({}, { skipAutoProcess: true }); }
       catch { estado = { config: {}, periodo: "", fechaLimite: null, plazoVencido: false, contratos: [], resumenes: [], periodos: [] }; }
       const esMio = (c) => (scopedAccounts.length === 0 ? false : ((scopedDips.has(dip) && String(c.employeeDip || "").toUpperCase() === dip) || payrollAccountIds.has(c.companyAccountId)));
       const contratos = (estado.contratos || []).filter(esMio);
