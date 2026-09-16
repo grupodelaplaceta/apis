@@ -391,6 +391,23 @@ export default async function handler(req, res) {
       return json(res, 201, { ok: true, contrato });
     }
 
+    if (req.method === "GET" && path.startsWith("/api/web/nominas/periodos/") && path.endsWith("/pdf-data")) {
+      const periodId = decodeURIComponent(path.slice("/api/web/nominas/periodos/".length, -"/pdf-data".length));
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountIds = new Set(owner.accounts.map((account) => account.id));
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      const estado = await N.estadoNominas({}, { skipAutoProcess: true });
+      const periodo = (estado.periodos || []).find((item) => item.id === periodId);
+      const contrato = periodo ? (estado.contratos || []).find((item) => item.id === periodo.contractId) : null;
+      const autorizado = periodo && contrato && (accountIds.has(contrato.companyAccountId) || String(contrato.employeeDip || "").toUpperCase() === dip);
+      if (!autorizado) return json(res, 404, { error: "nomina_no_encontrada" });
+      const empresa = (state.accounts || []).find((account) => account.id === contrato.companyAccountId);
+      const trabajador = (state.accounts || []).find((account) => account.id === contrato.employeeAccountId);
+      return json(res, 200, { periodo, contrato, empresa: empresa ? { id: empresa.id, displayName: empresa.displayName || empresa.id, eip: empresa.eip || "" } : null, trabajador: trabajador ? { id: trabajador.id, displayName: trabajador.displayName || contrato.employeeName, iban: maskIban(trabajador.iban) } : null });
+    }
+
     // Nóminas del titular (solo lectura): como empleado (por DIP) o como
     // empresa/gestor (por cuentas Business). Nunca se exponen nóminas ajenas.
     if (req.method === "GET" && path === "/api/web/nominas") {
