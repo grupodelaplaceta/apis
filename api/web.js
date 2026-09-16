@@ -399,6 +399,29 @@ export default async function handler(req, res) {
       return json(res, 201, { ok: true, contrato });
     }
 
+    if (req.method === "GET" && path.startsWith("/api/web/nominas/contratos/") && path.endsWith("/pdf-data")) {
+      const contractId = decodeURIComponent(path.slice("/api/web/nominas/contratos/".length, -"/pdf-data".length));
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountIds = new Set(owner.accounts.map((account) => account.id));
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      const estado = await N.estadoNominas({}, { skipAutoProcess: true });
+      const contrato = (estado.contratos || []).find((item) => item.id === contractId);
+      const autorizado = contrato && (accountIds.has(contrato.companyAccountId) || String(contrato.employeeDip || "").toUpperCase() === dip);
+      if (!autorizado) return json(res, 404, { error: "contrato_no_encontrado" });
+      const config = estado.config || {};
+      const calculo = N.calcularNomina(contrato, {}, config);
+      const empresa = (state.accounts || []).find((account) => account.id === contrato.companyAccountId);
+      const trabajador = (state.accounts || []).find((account) => account.id === contrato.employeeAccountId);
+      return json(res, 200, {
+        periodo: { id: `estimacion-${contrato.id}`, periodo: estado.periodo, status: contrato.status === "Ended" ? "Ended" : "Estimate", ...calculo },
+        contrato,
+        empresa: empresa ? { id: empresa.id, displayName: empresa.displayName || empresa.id, eip: empresa.eip || "" } : null,
+        trabajador: trabajador ? { id: trabajador.id, displayName: trabajador.displayName || contrato.employeeName, iban: maskIban(trabajador.iban) } : null
+      });
+    }
+
     if (req.method === "GET" && path.startsWith("/api/web/nominas/periodos/") && path.endsWith("/pdf-data")) {
       const periodId = decodeURIComponent(path.slice("/api/web/nominas/periodos/".length, -"/pdf-data".length));
       const state = await readBankState();
