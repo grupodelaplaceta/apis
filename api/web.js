@@ -356,9 +356,11 @@ export default async function handler(req, res) {
       const employeeDip = String(body.employeeDip || body.dip || "").trim().toUpperCase();
       if (!employeeDip) return json(res, 400, { error: "Se requiere el DIP del trabajador" });
       const employeeAccountId = String(body.employeeAccountId || "").trim();
-      const employee = employeeAccountId ? (state.accounts || []).find((account) => account.id === employeeAccountId) : null;
-      if (employeeAccountId && !employee) return json(res, 404, { error: "Cuenta del trabajador no encontrada" });
-      if (employee && String(employee.titularDip || employee.dip || employee.placetaId || "").trim().toUpperCase() !== employeeDip) {
+      if (!employeeAccountId) return json(res, 400, { error: "Selecciona la cuenta personal del trabajador" });
+      const employee = (state.accounts || []).find((account) => account.id === employeeAccountId);
+      if (!employee) return json(res, 404, { error: "Cuenta del trabajador no encontrada" });
+      if (String(employee.type || "").toLowerCase() !== "current") return json(res, 400, { error: "El trabajador debe tener una cuenta personal corriente" });
+      if (String(employee.titularDip || employee.dip || employee.placetaId || "").trim().toUpperCase() !== employeeDip) {
         return json(res, 400, { error: "La cuenta del trabajador no corresponde al DIP indicado" });
       }
       const contrato = await N.guardarContrato({
@@ -366,10 +368,11 @@ export default async function handler(req, res) {
         eip,
         employeeAccountId,
         employeeDip,
-        employeeName: String(body.employeeName || body.nombre || "").trim(),
-        roleTitle: String(body.roleTitle || body.puesto || "").trim(),
+        employeeName: String(body.employeeName || body.nombre || employee.displayName || "").trim(),
+        roleTitle: String(body.roleTitle || body.puesto || "Trabajador").trim(),
         grossSalaryPz: body.grossSalaryPz ?? body.salaryPz ?? body.salarioBasePz,
-        frequency: body.frequency || "Monthly",
+        frequency: ["Weekly", "Biweekly", "Monthly"].includes(body.frequency) ? body.frequency : "Weekly",
+        startDate: body.startDate || new Date().toISOString().slice(0, 10),
         complementos: Array.isArray(body.complementos) ? body.complementos : []
       });
       return json(res, 201, { ok: true, contrato });
@@ -618,7 +621,18 @@ export default async function handler(req, res) {
             c &&
             String(c.ownerPlacetaId || "").toUpperCase() === String(owner.placetaId).toUpperCase()
         )
-        .map((c) => ({ id: c.id, accountId: c.accountId, createdAt: c.createdAt || null }));
+        .map((c) => {
+          const account = (state.accounts || []).find((item) => item.id === c.accountId);
+          return {
+            id: c.id,
+            accountId: c.accountId,
+            displayName: account?.displayName || c.accountId,
+            employeeDip: account?.titularDip || account?.dip || account?.placetaId || "",
+            type: account?.type || "Current",
+            iban: maskIban(account?.iban),
+            createdAt: c.createdAt || null
+          };
+        });
       return json(res, 200, { contactos: contacts });
     }
 
