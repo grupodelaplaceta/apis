@@ -337,6 +337,44 @@ export default async function handler(req, res) {
       });
     }
 
+    // Alta de trabajadores: solo desde una cuenta Business propia. La cuenta
+    // concreta queda guardada en companyAccountId para que cada nómina se
+    // abone desde la cuenta bancaria elegida; el EIP limita las cuentas válidas.
+    if (req.method === "POST" && path === "/api/web/nominas/trabajadores") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const companyAccountId = String(body.companyAccountId || body.from || "").trim();
+      const company = owner.accounts.find((account) => account.id === companyAccountId);
+      if (!company) return json(res, 403, { error: "La cuenta de empresa no pertenece al titular" });
+      if (String(company.type || company.kind || "").toLowerCase() !== "business") {
+        return json(res, 403, { error: "Selecciona una cuenta de empresa para dar de alta trabajadores" });
+      }
+      const eip = String(company.eip || "").trim().toUpperCase();
+      if (!eip) return json(res, 400, { error: "La cuenta de empresa no tiene EIP asociado" });
+      const employeeDip = String(body.employeeDip || body.dip || "").trim().toUpperCase();
+      if (!employeeDip) return json(res, 400, { error: "Se requiere el DIP del trabajador" });
+      const employeeAccountId = String(body.employeeAccountId || "").trim();
+      const employee = employeeAccountId ? (state.accounts || []).find((account) => account.id === employeeAccountId) : null;
+      if (employeeAccountId && !employee) return json(res, 404, { error: "Cuenta del trabajador no encontrada" });
+      if (employee && String(employee.titularDip || employee.dip || employee.placetaId || "").trim().toUpperCase() !== employeeDip) {
+        return json(res, 400, { error: "La cuenta del trabajador no corresponde al DIP indicado" });
+      }
+      const contrato = await N.guardarContrato({
+        companyAccountId,
+        eip,
+        employeeAccountId,
+        employeeDip,
+        employeeName: String(body.employeeName || body.nombre || "").trim(),
+        roleTitle: String(body.roleTitle || body.puesto || "").trim(),
+        grossSalaryPz: body.grossSalaryPz ?? body.salaryPz ?? body.salarioBasePz,
+        frequency: body.frequency || "Monthly",
+        complementos: Array.isArray(body.complementos) ? body.complementos : []
+      });
+      return json(res, 201, { ok: true, contrato });
+    }
+
     // Nóminas del titular (solo lectura): como empleado (por DIP) o como
     // empresa/gestor (por cuentas Business). Nunca se exponen nóminas ajenas.
     if (req.method === "GET" && path === "/api/web/nominas") {
