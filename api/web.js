@@ -337,6 +337,19 @@ export default async function handler(req, res) {
       });
     }
 
+    // Busca una cuenta personal por DIP, como hace la app cuando el trabajador
+    // se introduce manualmente en vez de elegir un contacto guardado.
+    if (req.method === "GET" && path === "/api/web/nominas/trabajadores/buscar") {
+      const dipBuscado = String(url.searchParams.get("dip") || "").trim().toUpperCase();
+      if (!dipBuscado) return json(res, 400, { error: "dip_requerido" });
+      const state = await readBankState();
+      const cuentas = (state.accounts || [])
+        .filter((account) => String(account.type || "").toLowerCase() === "current")
+        .filter((account) => String(account.titularDip || account.dip || account.placetaId || "").trim().toUpperCase() === dipBuscado)
+        .map((account) => ({ id: account.id, displayName: account.displayName || "Trabajador", employeeDip: dipBuscado, type: account.type, iban: maskIban(account.iban) }));
+      return json(res, 200, { cuentas });
+    }
+
     // Alta de trabajadores: solo desde una cuenta Business propia. La cuenta
     // concreta queda guardada en companyAccountId para que cada nómina se
     // abone desde la cuenta bancaria elegida; el EIP limita las cuentas válidas.
