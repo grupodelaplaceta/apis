@@ -37,9 +37,16 @@ async function fetchFacturacionEip(eip, mes) {
 }
 
 // Cuentas de empresa (Business) del titular/gestor y sus EIPs únicos.
-function empresasDelOwner(owner) {
+function cuentasActivas(owner, url) {
+  const requested = String(url?.searchParams.get("cuenta") || "").trim();
+  if (!requested) return owner.accounts || [];
+  const selected = (owner.accounts || []).find((account) => account.id === requested);
+  return selected ? [selected] : [];
+}
+
+function empresasDelOwner(owner, accounts = owner.accounts) {
   const porEip = new Map();
-  for (const a of owner.accounts || []) {
+  for (const a of accounts || []) {
     const tipo = String(a.type || a.kind || "").toLowerCase();
     const eip = String(a.eip || "").toUpperCase();
     if (tipo !== "business" && tipo !== "state") continue;
@@ -159,7 +166,11 @@ function accountToView(a) {
     lastRbuClaim: a.lastRbuClaim || null,
     sendLimitPz: a.sendLimitPz ?? null,
     parentAccountId: a.parentAccountId || null,
-    closedAt: a.closedAt || null
+    closedAt: a.closedAt || null,
+    titularDip: a.titularDip || a.dip || a.placetaId || null,
+    cotitularDip: a.cotitularDip || a.cotitular || null,
+    cotitularHastaEdad: a.cotitularHastaEdad || null,
+    entityName: a.entityName || a.nombre || null
   };
 }
 
@@ -311,11 +322,13 @@ export default async function handler(req, res) {
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const dip = dipNormalizadoDe(req.placetaIdUser);
-      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const scopedAccounts = cuentasActivas(owner, url);
+      const accountIds = new Set(scopedAccounts.map((a) => a.id));
+      const scopedDips = new Set(scopedAccounts.flatMap((a) => [a.dip, a.titularDip, a.placetaId].filter(Boolean)).map((value) => String(value).toUpperCase()));
       let estado;
       try { estado = await N.estadoNominas({}); }
       catch { estado = { config: {}, periodo: "", fechaLimite: null, plazoVencido: false, contratos: [], resumenes: [], periodos: [] }; }
-      const esMio = (c) => String(c.employeeDip || "").toUpperCase() === dip || accountIds.has(c.companyAccountId);
+      const esMio = (c) => (scopedAccounts.length === 0 ? false : ((scopedDips.has(dip) && String(c.employeeDip || "").toUpperCase() === dip) || accountIds.has(c.companyAccountId)));
       const contratos = (estado.contratos || []).filter(esMio);
       const ids = new Set(contratos.map((c) => c.id));
       const resumenes = (estado.resumenes || []).filter((r) => ids.has(r.contrato?.id));
@@ -341,6 +354,8 @@ export default async function handler(req, res) {
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const dip = dipNormalizadoDe(req.placetaIdUser);
+      const scopedAccounts = cuentasActivas(owner, url);
+      const scopedIsBusiness = scopedAccounts.length > 0 && scopedAccounts.every((account) => ["business", "state"].includes(String(account.type || account.kind || "").toLowerCase()));
       let declaraciones = [];
       const empresas = [];
       try {
@@ -349,8 +364,8 @@ export default async function handler(req, res) {
           T.listDeclarationsForContributor({ placetaId: owner.placetaId })
         ]);
         const vistos = new Set();
-        declaraciones = [...propias, ...porPlaceta].filter((d) => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
-        for (const emp of empresasDelOwner(owner)) {
+        declaraciones = scopedIsBusiness ? [] : [...propias, ...porPlaceta].filter((d) => (vistos.has(d.id) ? false : (vistos.add(d.id), true)));
+        for (const emp of empresasDelOwner(owner, cuentasActivas(owner, url))) {
           const contrib = await T.findContributorByEip(emp.eip);
           const decl = contrib ? await T.listDeclarationsForContributor({ placetaId: contrib.placeta_id }) : [];
           empresas.push({ eip: emp.eip, nombre: emp.nombre, declaraciones: decl });
@@ -364,7 +379,7 @@ export default async function handler(req, res) {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const accountIds = new Set(cuentasActivas(owner, url).map((a) => a.id));
       const holdings = (state.investmentHoldings || []).filter((h) => h && accountIds.has(h.accountId));
       const operaciones = (state.investmentOperations || []).filter((o) => o && accountIds.has(o.accountId));
       return json(res, 200, { holdings, operaciones });
@@ -376,7 +391,7 @@ export default async function handler(req, res) {
         const state = await readBankState();
         const owner = resolveOwner(state, req.placetaIdUser.dip);
         if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-        const accountIds = new Set(owner.accounts.map((a) => a.id));
+        const accountIds = new Set(cuentasActivas(owner, url).map((a) => a.id));
         const solicitudes = (state.subsidyRequests || []).filter((s) => s && accountIds.has(s.targetAccountId));
         return json(res, 200, { solicitudes, degradado: false });
       } catch (error) {
@@ -447,7 +462,7 @@ export default async function handler(req, res) {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const accountIds = new Set(cuentasActivas(owner, url).map((a) => a.id));
       const users = state.users || [];
       const gestores = (state.accountHolders || [])
         .filter((h) => h && accountIds.has(h.accountId))
@@ -473,7 +488,8 @@ export default async function handler(req, res) {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const scopedAccounts = cuentasActivas(owner, url);
+      const accountIds = new Set(scopedAccounts.map((a) => a.id));
       const flags = (state.complianceFlags || [])
         .filter((f) => f && accountIds.has(f.accountId))
         .map((f) => ({
@@ -487,7 +503,7 @@ export default async function handler(req, res) {
       return json(res, 200, {
         censado: !!owner.user.tributosCensusDate,
         flags,
-        cuentas: owner.accounts.map((a) => ({
+        cuentas: scopedAccounts.map((a) => ({
           id: a.id,
           displayName: a.displayName || "Cuenta",
           complianceStatus: a.complianceStatus || "Clear",
@@ -657,7 +673,7 @@ export default async function handler(req, res) {
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const mes = String(url.searchParams.get("mes") || new Date().toISOString().slice(0, 7));
-      const empresas = empresasDelOwner(owner);
+      const empresas = empresasDelOwner(owner, cuentasActivas(owner, url));
       if (empresas.length === 0) {
         return json(res, 200, { ok: true, mes, empresas: [], mensaje: "No tienes cuentas de empresa con EIP" });
       }
