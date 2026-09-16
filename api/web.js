@@ -416,6 +416,19 @@ export default async function handler(req, res) {
       return json(res, 200, { periodo, contrato, empresa: empresa ? { id: empresa.id, displayName: empresa.displayName || empresa.id, eip: empresa.eip || "" } : null, trabajador: trabajador ? { id: trabajador.id, displayName: trabajador.displayName || contrato.employeeName, iban: maskIban(trabajador.iban) } : null });
     }
 
+    if (req.method === "POST" && path.startsWith("/api/web/nominas/trabajadores/") && path.endsWith("/despedir")) {
+      const contractId = decodeURIComponent(path.slice("/api/web/nominas/trabajadores/".length, -"/despedir".length));
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const cuentaEmpresa = new Set(owner.accounts.filter((account) => String(account.type || "").toLowerCase() === "business").map((account) => account.id));
+      const contrato = (await N.listarContratos({})).find((item) => item.id === contractId);
+      if (!contrato || !cuentaEmpresa.has(contrato.companyAccountId)) return json(res, 404, { error: "contrato_no_encontrado" });
+      if (contrato.status === "Ended") return json(res, 200, { ok: true, contrato });
+      const finalizado = await N.guardarContrato({ ...contrato, status: "Ended", endDate: new Date().toISOString().slice(0, 10) });
+      return json(res, 200, { ok: true, contrato: finalizado });
+    }
+
     // Nóminas del titular (solo lectura): como empleado (por DIP) o como
     // empresa/gestor (por cuentas Business). Nunca se exponen nóminas ajenas.
     if (req.method === "GET" && path === "/api/web/nominas") {
@@ -446,7 +459,7 @@ export default async function handler(req, res) {
       const ids = new Set(contratos.map((c) => c.id));
       const resumenes = (estado.resumenes || []).filter((r) => ids.has(r.contrato?.id));
       const periodos = (estado.periodos || []).filter(
-        (p) => ids.has(p.contractId) || accountIds.has(p.companyAccountId) || String(p.employeeDip || "").toUpperCase() === dip
+        (p) => ids.has(p.contractId) || payrollAccountIds.has(p.companyAccountId) || String(p.employeeDip || "").toUpperCase() === dip
       );
       return json(res, 200, {
         config: estado.config,
