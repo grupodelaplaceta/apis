@@ -128,6 +128,28 @@ function maskEmail(email) {
   return `${user.slice(0, 2)}•••@${domain}`;
 }
 
+// El tipo es metadato técnico; el usuario debe ver siempre un concepto útil.
+function descriptiveConcept(transaction, accounts = new Map()) {
+  const explicit = String(transaction.concept || transaction.note || transaction.description || "").trim();
+  if (explicit && !["transfer", "transferencia", "placezum"].includes(explicit.toLowerCase())) {
+    // Evita enseñar códigos internos como DEVELOPER_PAYMENT o RBU como si
+    // fueran conceptos; los transforma en una etiqueta legible.
+    if (/^[A-Z][A-Z0-9_]+$/.test(explicit)) {
+      return explicit.toLowerCase().replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase());
+    }
+    return explicit;
+  }
+  const from = accounts.get(transaction.fromAccountId)?.displayName || transaction.fromAccountId || "cuenta origen";
+  const to = accounts.get(transaction.toAccountId)?.displayName || transaction.toAccountId || "cuenta destino";
+  const kind = String(transaction.kind || "").toLowerCase();
+  if (kind === "placezum") return `Pago a ${to}`;
+  if (kind === "rbu") return "Ingreso de renta básica universal";
+  if (kind.includes("payroll") || kind.includes("nomina")) return `Ingreso de nómina de ${from}`;
+  if (kind.includes("investment")) return `Operación de inversión con ${to}`;
+  if (kind.includes("subsid")) return `Ingreso de subvención de ${from}`;
+  return transaction.status === "Pending" ? `Transferencia a ${to} (pendiente de firma)` : `Transferencia a ${to}`;
+}
+
 // ── Resolución de titular + sus cuentas ─────────────────────────────────────
 // Se resuelve por DIP tolerando los alias con los que el banco guarda a la
 // misma persona (DIP, PLID-DIP, prefijos antiguos y cotitularías), de modo que
@@ -324,11 +346,23 @@ export default async function handler(req, res) {
       const dip = dipNormalizadoDe(req.placetaIdUser);
       const scopedAccounts = cuentasActivas(owner, url);
       const accountIds = new Set(scopedAccounts.map((a) => a.id));
+      // Una empresa puede tener varias cuentas bancarias, pero todas las
+      // cuentas que pagan sus nóminas deben pertenecer al mismo EIP. Al
+      // seleccionar una de ellas, ampliamos el alcance a las cuentas hermanas
+      // del EIP sin cambiar companyAccountId: ese campo sigue identificando la
+      // cuenta concreta que abona cada nómina.
+      const selectedEips = new Set(scopedAccounts.map((a) => String(a.eip || "").trim().toUpperCase()).filter(Boolean));
+      const eipAccountIds = new Set(
+        owner.accounts
+          .filter((a) => selectedEips.has(String(a.eip || "").trim().toUpperCase()))
+          .map((a) => a.id)
+      );
+      const payrollAccountIds = selectedEips.size > 0 ? eipAccountIds : accountIds;
       const scopedDips = new Set(scopedAccounts.flatMap((a) => [a.dip, a.titularDip, a.placetaId].filter(Boolean)).map((value) => String(value).toUpperCase()));
       let estado;
       try { estado = await N.estadoNominas({}); }
       catch { estado = { config: {}, periodo: "", fechaLimite: null, plazoVencido: false, contratos: [], resumenes: [], periodos: [] }; }
-      const esMio = (c) => (scopedAccounts.length === 0 ? false : ((scopedDips.has(dip) && String(c.employeeDip || "").toUpperCase() === dip) || accountIds.has(c.companyAccountId)));
+      const esMio = (c) => (scopedAccounts.length === 0 ? false : ((scopedDips.has(dip) && String(c.employeeDip || "").toUpperCase() === dip) || payrollAccountIds.has(c.companyAccountId)));
       const contratos = (estado.contratos || []).filter(esMio);
       const ids = new Set(contratos.map((c) => c.id));
       const resumenes = (estado.resumenes || []).filter((r) => ids.has(r.contrato?.id));
@@ -343,7 +377,7 @@ export default async function handler(req, res) {
         contratos,
         resumenes,
         periodos,
-        soyEmpresa: contratos.some((c) => accountIds.has(c.companyAccountId)),
+        soyEmpresa: contratos.some((c) => payrollAccountIds.has(c.companyAccountId)),
         soyEmpleado: contratos.some((c) => String(c.employeeDip || "").toUpperCase() === dip)
       });
     }
@@ -403,31 +437,53 @@ export default async function handler(req, res) {
       }
     }
 
+    if (req.method === "GET" && path.startsWith("/api/web/movimientos/") && path.split("/").length === 5) {
+      const transactionId = decodeURIComponent(path.slice("/api/web/movimientos/".length));
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const transaction = (state.transactions || []).find((item) => item?.id === transactionId);
+      if (!transaction || (!accountIds.has(transaction.fromAccountId) && !accountIds.has(transaction.toAccountId))) {
+        return json(res, 404, { error: "movimiento_no_encontrado" });
+      }
+      const accounts = new Map((state.accounts || []).map((account) => [account.id, account]));
+      return json(res, 200, {
+        movimiento: {
+          id: transaction.id,
+          fromAccountId: transaction.fromAccountId,
+          toAccountId: transaction.toAccountId,
+          amountPz: transaction.amountPz ?? transaction.netAmount ?? 0,
+          ivaPz: transaction.ivaPz ?? 0,
+          concept: descriptiveConcept(transaction, accounts),
+          status: transaction.status || "Settled",
+          createdAt: transaction.createdAt || null,
+          esEntrada: accountIds.has(transaction.toAccountId)
+        }
+      });
+    }
+
     if (req.method === "GET" && path === "/api/web/movimientos") {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
       const accountIds = new Set(owner.accounts.map((a) => a.id));
+      const accounts = new Map((state.accounts || []).map((account) => [account.id, account]));
       const cuenta = url.searchParams.get("cuenta") || "";
       const cuentaValida = !!cuenta && accountIds.has(cuenta);
       const movs = (state.transactions || [])
-        .filter(
-          (t) =>
-            t &&
-            (accountIds.has(t.fromAccountId) || accountIds.has(t.toAccountId))
-        )
+        .filter((t) => t && (accountIds.has(t.fromAccountId) || accountIds.has(t.toAccountId)))
         .filter((t) => !cuentaValida || t.fromAccountId === cuenta || t.toAccountId === cuenta)
         .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
         .slice(0, limit)
         .map((t) => ({
           id: t.id,
-          kind: t.kind || "Transfer",
           fromAccountId: t.fromAccountId,
           toAccountId: t.toAccountId,
           amountPz: t.amountPz ?? t.netAmount ?? 0,
           ivaPz: t.ivaPz ?? 0,
-          concept: t.concept || t.note || "",
+          concept: descriptiveConcept(t, accounts),
           status: t.status || "Settled",
           createdAt: t.createdAt || null,
           esEntrada: cuentaValida ? t.toAccountId === cuenta : accountIds.has(t.toAccountId)
