@@ -1,11 +1,32 @@
 import { mongo } from "../lib/mongo.js";
 import { json, methodNotAllowed, readBody } from "../lib/http.js";
 import { assertRequestAllowed } from "../lib/security.js";
+import { readTreasuryConfig } from "../lib/bankCollections.js";
 
 export default async function handler(req, res) {
   try {
     if (req.method !== "GET") return methodNotAllowed(res, ["GET"]);
     await assertRequestAllowed(req, res, await readBody(req));
+    const url = new URL(req.url, "https://api.local");
+    if (url.searchParams.get("version") === "1") {
+      const versionCode = Number(url.searchParams.get("versionCode") || "0");
+      if (!Number.isFinite(versionCode) || versionCode <= 0) {
+        return json(res, 400, { error: "invalid_version_code" });
+      }
+      const config = await readTreasuryConfig();
+      const minSupportedVersionCode = Number(config.minSupportedVersionCode || 4);
+      const maintenanceMode = Boolean(config.maintenanceMode);
+      return json(res, 200, {
+        ok: true,
+        updateRequired: versionCode < minSupportedVersionCode,
+        versionCode,
+        minSupportedVersionCode,
+        maintenanceMode,
+        maintenanceMessage: config.maintenanceMessage || "Estamos haciendo mantenimiento. Vuelve a intentarlo en unos minutos.",
+        errorCode: maintenanceMode ? "BPL-MAINT-001" : null,
+        source: "vercel"
+      });
+    }
     await (await mongo()).command({ ping: 1 });
     return json(res, 200, { ok: true });
   } catch (error) {
