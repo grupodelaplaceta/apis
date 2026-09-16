@@ -505,6 +505,28 @@ export default async function handler(req, res) {
       const dip = dipNormalizadoDe(req.placetaIdUser);
       const scopedAccounts = cuentasActivas(owner, url);
       const scopedIsBusiness = scopedAccounts.length > 0 && scopedAccounts.every((account) => ["business", "state"].includes(String(account.type || account.kind || "").toLowerCase()));
+      const scopedIds = new Set(scopedAccounts.map((account) => account.id));
+      const settled = (state.transactions || []).filter((tx) => (!tx.status || tx.status === "Settled") && (scopedIds.has(tx.fromAccountId) || scopedIds.has(tx.toAccountId)));
+      const patrimonioMedio = scopedAccounts.reduce((sum, account) => sum + Number(account.balancePz || 0), 0);
+      const ingresos = settled.filter((tx) => scopedIds.has(tx.toAccountId) && !scopedIds.has(tx.fromAccountId)).reduce((sum, tx) => sum + Number(tx.amountPz || tx.netAmount || 0), 0);
+      const pagos = settled.filter((tx) => scopedIds.has(tx.fromAccountId) && !scopedIds.has(tx.toAccountId)).reduce((sum, tx) => sum + Number(tx.amountPz || tx.netAmount || 0), 0);
+      const ia = patrimonioMedio > 0 ? (ingresos - pagos) / patrimonioMedio : 0;
+      const irmRates = scopedIsBusiness ? [0, 0.0075, 0.02, 0.05, 0.09] : [0, 0.005, 0.015, 0.04, 0.06];
+      const irmTramo = ia <= 0.05 ? 1 : ia <= 0.15 ? 2 : ia <= 0.30 ? 3 : 4;
+      const cuotaIrm = Number((patrimonioMedio * (irmRates[irmTramo] || 0)).toFixed(2));
+      const igfTramos = scopedIsBusiness
+        ? [[20000, 0], [500000, 0.35], [Infinity, 0.85]]
+        : [[5000, 0], [20000, 0.10], [Infinity, 0.30]];
+      let cuotaIgfRaw = 0;
+      let tramoAnterior = 0;
+      for (const [limite, tipo] of igfTramos) {
+        const baseTramo = Math.max(0, Math.min(patrimonioMedio, limite) - tramoAnterior);
+        cuotaIgfRaw += baseTramo * tipo;
+        tramoAnterior = limite;
+        if (patrimonioMedio <= limite) break;
+      }
+      const cuotaIgf = Number(cuotaIgfRaw.toFixed(2));
+      const ivaRepercutido = scopedIsBusiness ? Number(settled.filter((tx) => scopedIds.has(tx.toAccountId)).reduce((sum, tx) => sum + Number(tx.ivaPz || 0), 0).toFixed(2)) : 0;
       let declaraciones = [];
       const empresas = [];
       try {
@@ -520,7 +542,7 @@ export default async function handler(req, res) {
           empresas.push({ eip: emp.eip, nombre: emp.nombre, declaraciones: decl });
         }
       } catch { /* sin registros tributarios: devolvemos vacío */ }
-      return json(res, 200, { declaraciones, empresas });
+      return json(res, 200, { declaraciones, empresas, estimacion: { periodo: new Date().toISOString().slice(0, 7), patrimonioMedio: Number(patrimonioMedio.toFixed(2)), ingresos: Number(ingresos.toFixed(2)), pagos: Number(pagos.toFixed(2)), indiceAcumulacionPct: Number((ia * 100).toFixed(2)), cuotaIrm, cuotaIgf, ivaRepercutido, ivaDeclarado: scopedIsBusiness && Boolean(scopedAccounts[0]?.declaraIva), total: Number((cuotaIrm + cuotaIgf + (scopedAccounts[0]?.declaraIva ? ivaRepercutido : 0)).toFixed(2)), fuente: "movimientos y saldos bancarios reales" } });
     }
 
     // Cartera de inversiones del titular (holdings y operaciones).
@@ -528,10 +550,16 @@ export default async function handler(req, res) {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const accountIds = new Set(cuentasActivas(owner, url).map((a) => a.id));
+      const cuentas = cuentasActivas(owner, url);
+      const permitidas = cuentas.filter((account) => {
+        const tipo = String(account.type || account.kind || "").toLowerCase();
+        return ["investment", "inversion", "business", "empresa"].includes(tipo) || Boolean(account.eip);
+      });
+      if (!permitidas.length) return json(res, 200, { holdings: [], operaciones: [], disponible: false, motivo: "solo_cuentas_inversion_o_empresa" });
+      const accountIds = new Set(permitidas.map((a) => a.id));
       const holdings = (state.investmentHoldings || []).filter((h) => h && accountIds.has(h.accountId));
       const operaciones = (state.investmentOperations || []).filter((o) => o && accountIds.has(o.accountId));
-      return json(res, 200, { holdings, operaciones });
+      return json(res, 200, { holdings, operaciones, disponible: true });
     }
 
     // Subvenciones del titular (solicitudes recibidas por sus cuentas).
@@ -627,6 +655,41 @@ export default async function handler(req, res) {
           // NOTA: el PIN nunca se expone por la web
         }));
       return json(res, 200, { tarjetas: cards });
+    }
+
+    if (req.method === "POST" && path === "/api/web/gestores") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const accountId = String(body.accountId || url.searchParams.get("cuenta") || "").trim();
+      const account = owner.accounts.find((item) => item.id === accountId);
+      if (!account) return json(res, 403, { error: "cuenta_no_pertenece_al_titular" });
+      const requesterDip = dipNormalizadoDe(req.placetaIdUser);
+      const primaryOwner = String(account.titularDip || account.dip || account.placetaId || "").toUpperCase();
+      if (primaryOwner !== requesterDip && primaryOwner !== `DIP-${requesterDip}` && primaryOwner !== `PLID-${requesterDip}`) {
+        return json(res, 403, { error: "solo_el_titular_principal_puede_añadir_cotitulares" });
+      }
+      if (!["current", "savings", "shared", "joint"].includes(String(account.type || "Current").toLowerCase())) {
+        return json(res, 400, { error: "tipo_cuenta_no_admite_cotitulares" });
+      }
+      const placetaId = String(body.placetaId || body.dip || "").trim().toUpperCase();
+      if (!placetaId) return json(res, 400, { error: "cotitular_requerido" });
+      if (String(account.titularDip || account.dip || account.placetaId || "").toUpperCase() === placetaId) {
+        return json(res, 400, { error: "el_titular_ya_es_el_propietario" });
+      }
+      const existing = (state.accountHolders || []).find((item) => item.accountId === accountId && String(item.placetaId || "").toUpperCase() === placetaId);
+      const holder = {
+        id: existing?.id || `holder-${crypto.randomUUID()}`,
+        accountId,
+        placetaId,
+        role: "CoOwner",
+        ownershipPercent: Math.max(0, Math.min(100, Number(body.ownershipPercent) || 0)),
+        linkedAt: existing?.linkedAt || new Date().toISOString(),
+        validUntil: body.validUntil || existing?.validUntil || null
+      };
+      await upsertEntity("bank_account_holders", holder.id, holder);
+      return json(res, existing ? 200 : 201, { ok: true, gestor: holder });
     }
 
     if (req.method === "GET" && path === "/api/web/gestores") {
