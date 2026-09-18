@@ -15,6 +15,7 @@ const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://admin-placet
 const DOCS_API_KEY = process.env.DOCS_API_KEY || 'docs-shared-key-2026';
 const PLACETA_API_SECRET = process.env.PLACETA_API_SECRET || '';
 const MONGO_BRIDGE_URL = process.env.MONGO_BRIDGE_URL || 'http://localhost:8787';
+const VALID_API_KEYS = (process.env.DOCS_API_KEYS || process.env.DOCS_API_KEY || 'docs-shared-key-2026').split(',').map((key) => key.trim()).filter(Boolean);
 
 /**
  * Firma HMAC para comunicación con el Mongo Bridge
@@ -109,6 +110,12 @@ export default async function handler(req, res) {
     return;
   }
 
+  const apiKey = req.headers['x-api-key'] || req.query.api_key;
+  if (VALID_API_KEYS.length && !VALID_API_KEYS.includes(apiKey)) {
+    res.status(401).json({ error: 'API key inválida' });
+    return;
+  }
+
   // Leer body (Vercel raw body)
   const rawBody = req.body || '{}';
   const body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
@@ -160,6 +167,7 @@ async function solicitarAperturaCuenta(dip, nombre, datos, res) {
     dipSolicitante: dip,
     nombreSolicitante: nombre,
     datos: {
+      ...datos,
       tipoCuenta,
       displayName: displayName || `Cuenta ${tipoCuenta}`,
       fechaSolicitud: new Date().toISOString(),

@@ -12,6 +12,21 @@ import crypto from 'crypto';
 import { readBankState, writeBankState } from '../lib/bankCollections.js';
 
 const VALID_API_KEYS = (process.env.DOCS_API_KEYS || 'docs-shared-key-2026').split(',');
+const RSP_URL = String(process.env.RSP_URL || process.env.ADMIN_PLACETA_URL || '').replace(/\/+$/, '');
+const RSP_INTEGRATION_KEY = process.env.RSP_INTEGRATION_KEY || process.env.GDLP_RSP_API_KEY || '';
+
+async function notificarAperturaFirmada(payload) {
+  if (!RSP_URL || !RSP_INTEGRATION_KEY) return null;
+  const response = await fetch(`${RSP_URL}/api/integraciones/banco/apertura-firmada`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Integration-Key': RSP_INTEGRATION_KEY },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(10000)
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.error || `RSP responde ${response.status}`);
+  return body;
+}
 
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -74,11 +89,31 @@ export default async function handler(req, res) {
     // Guardar con la librería autoritativa: lock + reconciliación + upsert.
     await writeBankState(state);
 
+    let rsp = null;
+    if (action === 'crear-cuenta' && result?.tipo === 'Business') {
+      try {
+        rsp = await notificarAperturaFirmada({
+          accountId: result.accountId,
+          iban: result.iban,
+          tipoCuenta: result.tipo,
+          eip: data?.eip || null,
+          dip: data?.placetaId || firmadoPor || null,
+          nombre: data?.displayName || data?.placetaId || firmadoPor || 'Empresa',
+          promocionEmpresa: data?.promocionEmpresa || null,
+          firmadoPor: firmadoPor || null,
+          actionId: actionId || null,
+        });
+      } catch (error) {
+        rsp = { ok: false, pendiente: true, error: error.message };
+      }
+    }
+
     res.json({
       success: true,
       action,
       actionId,
       result,
+      rsp,
       message: `✅ Acción "${action}" ejecutada correctamente`
     });
 
@@ -105,6 +140,7 @@ async function ejecutarCrearCuenta(state, data, firmadoPor) {
     displayName: displayName || `Cuenta ${tipoCuenta}`,
     iban,
     placetaId,
+    eip: data?.eip || null,
     balancePz: 0,
     createdAt: new Date().toISOString(),
     createdBy: `firma:${firmadoPor}`,
@@ -131,7 +167,7 @@ async function ejecutarCrearCuenta(state, data, firmadoPor) {
     console.warn('[CrearCuenta] auto-alta tributos falló:', e.message);
   }
 
-  return { accountId, iban, tipo: tipoCuenta };
+  return { accountId, iban, tipo: tipoCuenta, eip: newAccount.eip };
 }
 
 async function ejecutarModificarCuenta(state, data) {
