@@ -20,9 +20,32 @@ import {
   getBreakdown, createInvoice, verifyRegularization
 } from "../../../lib/tributos.js";
 import { crearPagoIvaPendiente } from "../../../lib/pagoIva.js";
+import { readBankState } from "../../../lib/bankCollections.js";
+import { buscarTitularPorDip } from "../../../lib/registroPlacetaId.js";
+import { assertPlacetaIdBearer } from "../../../lib/security.js";
 
 const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://rsp.laplaceta.org';
-const TRIBUTOS_API_KEY = process.env.TRIBUTOS_API_KEY || 'android-tributos-key-2026';
+const TRIBUTOS_API_KEY = process.env.TRIBUTOS_API_KEY || '';
+
+function identityMatches(value, owner) {
+  const clean = String(value || "").trim().toUpperCase().replace(/^(DIP-|PLID-)/, "");
+  return !!clean && [owner?.user?.dip, owner?.user?.placetaId, owner?.placetaId]
+    .filter(Boolean).some((candidate) => String(candidate).trim().toUpperCase().replace(/^(DIP-|PLID-)/, "") === clean);
+}
+
+async function citizenOwner(req, res) {
+  if (!(await assertPlacetaIdBearer(req, res))) {
+    json(res, 401, { error: "auth_required" });
+    return null;
+  }
+  const state = await readBankState();
+  const identity = buscarTitularPorDip(state, req.placetaIdUser?.dip);
+  if (!identity.usuario && !identity.cuentas?.length) {
+    json(res, 404, { error: "titular_no_encontrado" });
+    return null;
+  }
+  return { state, user: identity.usuario, placetaId: identity.usuario?.placetaId || identity.cuentas[0]?.placetaId || req.placetaIdUser.dip, accounts: identity.cuentas || [] };
+}
 
 function segmentos(req) {
   // Vercel entrega req.query.ruta como ARRAY para catch-all [...ruta] cuando hay
@@ -127,8 +150,11 @@ export default async function handler(req, res) {
     if (first === 'estimado-impuestos') {
       if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
       const url = new URL(req.url, 'https://api.local');
-      const placetaId = url.searchParams.get('placeta_id') || url.searchParams.get('placetaId') || url.searchParams.get('dip') || '';
-      if (!placetaId) return json(res, 400, { error: 'placeta_id_requerido' });
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
+      const requestedId = url.searchParams.get('placeta_id') || url.searchParams.get('placetaId') || url.searchParams.get('dip') || '';
+      if (requestedId && !identityMatches(requestedId, owner)) return json(res, 403, { error: 'identidad_no_autorizada' });
+      const placetaId = owner.placetaId;
       const mesPeriodo = url.searchParams.get('mes_periodo') || new Date().toISOString().slice(0, 7);
       try {
         const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/estimado-impuestos?placeta_id=${encodeURIComponent(placetaId)}&mes_periodo=${encodeURIComponent(mesPeriodo)}`, {
@@ -151,6 +177,11 @@ export default async function handler(req, res) {
       const url = new URL(req.url, 'https://api.local');
       const eip = url.searchParams.get('eip') || url.searchParams.get('EIP') || '';
       if (!eip) return json(res, 400, { error: 'eip_requerido' });
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
+      if (!owner.accounts.some((account) => String(account.eip || '').toUpperCase() === eip.toUpperCase() && ['business', 'state'].includes(String(account.type || account.kind || '').toLowerCase()))) {
+        return json(res, 403, { error: 'eip_no_pertenece_al_titular' });
+      }
       try {
         const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/subvenciones?eip=${encodeURIComponent(eip)}`, {
           headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' },
@@ -175,6 +206,11 @@ export default async function handler(req, res) {
       const eip = (url.searchParams.get('eip') || url.searchParams.get('EIP') || '').toUpperCase();
       const mes = url.searchParams.get('mes') || new Date().toISOString().slice(0, 7);
       if (!eip) return json(res, 400, { error: 'eip_requerido' });
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
+      if (!owner.accounts.some((account) => String(account.eip || '').toUpperCase() === eip && ['business', 'state'].includes(String(account.type || account.kind || '').toLowerCase()))) {
+        return json(res, 403, { error: 'eip_no_pertenece_al_titular' });
+      }
       try {
         const r = await fetch(`${ADMIN_PLACETA_URL}/api/v1/tributos/facturacion?eip=${encodeURIComponent(eip)}&mes=${encodeURIComponent(mes)}`, {
           headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' },
@@ -195,6 +231,9 @@ export default async function handler(req, res) {
     // titular). Mismo contrato de confianza que el resto de consultas por EIP.
     if (first === 'facturacion' && seg[1] === 'pagar-iva') {
       if (req.method !== 'POST') return methodNotAllowed(res, ['POST', 'OPTIONS']);
+      if (!req.headers['idempotency-key']) return json(res, 400, { error: 'idempotency_key_required' });
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
       const body = JSON.parse((await readBody(req)) || '{}');
       const { from, eip, mes, facturaIds } = body;
       const creado = await crearPagoIvaPendiente({
@@ -204,6 +243,8 @@ export default async function handler(req, res) {
         facturaIds: Array.isArray(facturaIds) ? facturaIds : [],
         origen: 'banco-app-facturacion',
         actorDip: '',
+        idempotencyKey: req.headers['idempotency-key'] || '',
+        requestActor: req.placetaIdUser?.dip || '',
       });
       if (!creado.ok) {
         return json(res, creado.status || 500, {
@@ -219,16 +260,43 @@ export default async function handler(req, res) {
     if (first === 'declaraciones' && seg[1] === 'listar') {
       if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
       const url = new URL(req.url, 'https://api.local');
-      const placetaId = url.searchParams.get('placeta_id') || url.searchParams.get('placetaId');
-      const dip = url.searchParams.get('dip');
-      if (!placetaId && !dip) return json(res, 400, { error: 'placeta_id_o_dip_requerido' });
-
-      if (placetaId) {
-        const panel = await fetchPanelDeclarations(placetaId);
-        if (panel && panel.length > 0) return json(res, 200, { status: 'SUCCESS', origen: 'admin-placeta', declaraciones: panel });
-      }
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
+      const requestedId = url.searchParams.get('placeta_id') || url.searchParams.get('placetaId') || url.searchParams.get('dip');
+      if (requestedId && !identityMatches(requestedId, owner)) return json(res, 403, { error: 'identidad_no_autorizada' });
+      const placetaId = owner.placetaId;
+      const dip = req.placetaIdUser?.dip || owner.user?.dip;
+      const panel = await fetchPanelDeclarations(placetaId);
+      if (panel && panel.length > 0) return json(res, 200, { status: 'SUCCESS', origen: 'admin-placeta', declaraciones: panel });
       const declaraciones = await listDeclarationsForContributor({ placetaId, dip });
       return json(res, 200, { status: 'SUCCESS', origen: 'mongo', declaraciones });
+    }
+
+    if (first === 'declaraciones' && seg[1] === 'pdf') {
+      if (req.method !== 'GET') return methodNotAllowed(res, ['GET', 'OPTIONS']);
+      const url = new URL(req.url, 'https://api.local');
+      const owner = await citizenOwner(req, res);
+      if (!owner) return;
+      const requestedId = url.searchParams.get('placeta_id') || '';
+      if (requestedId && !identityMatches(requestedId, owner)) return json(res, 403, { error: 'identidad_no_autorizada' });
+      const pdfUrl = url.searchParams.get('pdf_url') || '';
+      const panel = await fetchPanelDeclarations(owner.placetaId);
+      const allowed = (panel || []).some((decl) => decl.pdf_url === pdfUrl && decl.estado_pago && /aprob|emit|pag/i.test(decl.estado_pago));
+      if (!allowed) return json(res, 404, { error: 'documento_no_disponible' });
+      let parsed;
+      try { parsed = new URL(pdfUrl); } catch { return json(res, 400, { error: 'pdf_url_invalida' }); }
+      if (parsed.origin !== new URL(ADMIN_PLACETA_URL).origin || !parsed.pathname.startsWith('/api/v1/tributos/declaraciones/')) {
+        return json(res, 400, { error: 'pdf_url_no_permitida' });
+      }
+      const upstream = await fetch(pdfUrl, { headers: { 'X-API-Key': TRIBUTOS_API_KEY, 'X-Platform': 'android' }, signal: AbortSignal.timeout(15000) });
+      if (!upstream.ok) return json(res, upstream.status, { error: 'pdf_rsp_no_disponible' });
+      const bytes = Buffer.from(await upstream.arrayBuffer());
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', 'attachment; filename="declaracion.pdf"');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(bytes);
+      return;
     }
 
     // ── GET /declaraciones/breakdown-iva ──────────────────────────────

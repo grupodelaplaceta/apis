@@ -9,13 +9,15 @@
  */
 
 import crypto from 'crypto';
+import { assertPlacetaIdBearer } from '../lib/security.js';
+import { readBankState } from '../lib/bankCollections.js';
+import { buscarTitularPorDip } from '../lib/registroPlacetaId.js';
 
 // Config
 const ADMIN_PLACETA_URL = process.env.ADMIN_PLACETA_URL || 'https://admin-placeta.vercel.app';
-const DOCS_API_KEY = process.env.DOCS_API_KEY || 'docs-shared-key-2026';
+const DOCS_API_KEY = process.env.DOCS_API_KEY || '';
 const PLACETA_API_SECRET = process.env.PLACETA_API_SECRET || '';
 const MONGO_BRIDGE_URL = process.env.MONGO_BRIDGE_URL || 'http://localhost:8787';
-const VALID_API_KEYS = (process.env.DOCS_API_KEYS || process.env.DOCS_API_KEY || 'docs-shared-key-2026').split(',').map((key) => key.trim()).filter(Boolean);
 
 /**
  * Firma HMAC para comunicación con el Mongo Bridge
@@ -98,7 +100,7 @@ export default async function handler(req, res) {
   // CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-API-Key');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
   if (req.method === 'OPTIONS') {
     res.status(200).end();
@@ -110,36 +112,63 @@ export default async function handler(req, res) {
     return;
   }
 
-  const apiKey = req.headers['x-api-key'] || req.query.api_key;
-  if (VALID_API_KEYS.length && !VALID_API_KEYS.includes(apiKey)) {
-    res.status(401).json({ error: 'API key inválida' });
+  if (!(await assertPlacetaIdBearer(req, res))) {
+    res.status(401).json({ error: 'auth_required' });
+    return;
+  }
+
+  if (!DOCS_API_KEY) {
+    res.status(503).json({ error: 'servicio_documental_no_configurado' });
     return;
   }
 
   // Leer body (Vercel raw body)
   const rawBody = req.body || '{}';
-  const body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody;
-  const { action, dip, nombre, datos = {} } = body;
+  let body;
+  try { body = typeof rawBody === 'string' ? JSON.parse(rawBody) : rawBody; }
+  catch { res.status(400).json({ error: 'json_invalido' }); return; }
+  const { action, nombre, datos = {} } = body;
+  const dip = req.placetaIdUser?.dip;
 
   if (!action || !dip) {
-    res.status(400).json({ error: 'action y dip son requeridos' });
+    res.status(400).json({ error: 'action y sesión PlacetaID son requeridas' });
     return;
   }
 
   try {
+    const state = await getBankState();
+    const titular = buscarTitularPorDip(state, dip);
+    const ownedIds = new Set((titular.cuentas || []).map((account) => account.id));
+    const accountId = String(datos.accountId || '').trim();
+    const requiresOwnedAccount = ['solicitar-modificacion-cuenta', 'solicitar-contrato-producto', 'solicitar-registro-fondo', 'solicitar-bloqueo-cuenta', 'solicitar-baja-cuenta'].includes(action);
+    if (requiresOwnedAccount && (!accountId || !ownedIds.has(accountId))) {
+      res.status(403).json({ error: 'cuenta_no_pertenece_al_titular' });
+      return;
+    }
+    if (action === 'solicitar-contrato-producto') {
+      const type = String(datos.productType || '').trim();
+      if (!type || !['Current', 'Savings', 'Child', 'Business', 'Investment'].includes(type)) {
+        res.status(400).json({ error: 'tipo_producto_invalido' });
+        return;
+      }
+    }
+    const nombreVerificado = titular.usuario?.displayName || titular.usuario?.nombre || dip;
+    const datosSeguros = { ...datos };
+    delete datosSeguros.dip;
+    delete datosSeguros.placetaId;
     switch (action) {
       case 'solicitar-apertura-cuenta':
-        return await solicitarAperturaCuenta(dip, nombre, datos, res);
+        return await solicitarAperturaCuenta(dip, nombreVerificado, datosSeguros, res);
       case 'solicitar-modificacion-cuenta':
-        return await solicitarModificacionCuenta(dip, nombre, datos, res);
+        return await solicitarModificacionCuenta(dip, nombreVerificado, datosSeguros, res);
       case 'solicitar-contrato-producto':
-        return await solicitarContratoProducto(dip, nombre, datos, res);
+        return await solicitarContratoProducto(dip, nombreVerificado, datosSeguros, res);
       case 'solicitar-registro-fondo':
-        return await solicitarRegistroFondo(dip, nombre, datos, res);
+        return await solicitarRegistroFondo(dip, nombreVerificado, datosSeguros, res);
       case 'solicitar-bloqueo-cuenta':
-        return await solicitarBloqueoCuenta(dip, nombre, datos, res);
+        return await solicitarBloqueoCuenta(dip, nombreVerificado, datosSeguros, res);
       case 'solicitar-baja-cuenta':
-        return await solicitarBajaCuenta(dip, nombre, datos, res);
+        return await solicitarBajaCuenta(dip, nombreVerificado, datosSeguros, res);
       default:
         res.status(400).json({ error: `Acción desconocida: ${action}` });
     }
@@ -257,14 +286,10 @@ async function solicitarModificacionCuenta(dip, nombre, datos, res) {
     }
   });
 
-  if (!docResult) {
-    res.status(503).json({
-      success: true,
-      estado: 'pendiente-admin',
-      message: 'Solicitud registrada. Admin generará el documento.'
-    });
-    return;
-  }
+    if (!docResult) {
+      res.status(503).json({ error: 'servicio_documental_no_disponible' });
+      return;
+    }
 
   res.json({
     success: true,
@@ -293,6 +318,11 @@ async function solicitarContratoProducto(dip, nombre, datos, res) {
       estado: 'pendiente-firma'
     }
   });
+
+  if (!docResult) {
+    res.status(503).json({ error: 'servicio_documental_no_disponible' });
+    return;
+  }
 
   if (!docResult) {
     res.status(503).json({
@@ -328,6 +358,11 @@ async function solicitarBloqueoCuenta(dip, nombre, datos, res) {
     }
   });
 
+  if (!docResult) {
+    res.status(503).json({ error: 'servicio_documental_no_disponible' });
+    return;
+  }
+
   res.json({
     success: true,
     estado: 'pendiente-firma',
@@ -352,6 +387,11 @@ async function solicitarBajaCuenta(dip, nombre, datos, res) {
       estado: 'pendiente-firma'
     }
   });
+
+  if (!docResult) {
+    res.status(503).json({ error: 'servicio_documental_no_disponible' });
+    return;
+  }
 
   res.json({
     success: true,

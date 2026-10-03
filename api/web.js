@@ -14,6 +14,7 @@ import * as N from "../lib/nominas.js";
 import * as T from "../lib/tributos.js";
 import crypto from "crypto";
 import { assertInvestmentAmount, calculateInvestmentResult, activeInvestments, investmentLimits, normalizeRisk } from "../lib/inversiones60.js";
+import { esJunior, validarTransferenciaJunior } from "../lib/limite-junior.js";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
 
@@ -698,7 +699,7 @@ export default async function handler(req, res) {
       const cuenta = url.searchParams.get("cuenta") || "";
       const cuentaValida = !!cuenta && accountIds.has(cuenta);
       const cards = (state.digitalCards || [])
-        .filter((c) => c && accountIds.has(c.accountId))
+        .filter((c) => c && accountIds.has(c.accountId) && c.productType === "placetapay-debito" && String(c.issuedBy || "").startsWith("firma:"))
         .filter((c) => !cuentaValida || c.accountId === cuenta)
         .map((c) => ({
           id: c.id,
@@ -707,7 +708,9 @@ export default async function handler(req, res) {
           tier: c.tier || "Standard",
           frozen: !!c.frozen,
           released: !!c.released,
-          cardNumber: maskCardNumber(c.cardNumber)
+          cardNumber: maskCardNumber(c.cardNumber),
+          productType: c.productType,
+          issuedAt: c.issuedAt || null
           // NOTA: el PIN nunca se expone por la web
         }));
       return json(res, 200, { tarjetas: cards });
@@ -836,6 +839,8 @@ export default async function handler(req, res) {
     if (req.method === "POST" && path === "/api/web/transferencia") {
       const body = JSON.parse((await readBody(req)) || "{}");
       const { from, to, cantidad, concepto } = body;
+      const idempotencyKey = String(req.headers["idempotency-key"] || "").trim();
+      if (!/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) return json(res, 400, { error: "idempotency_key_required" });
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
@@ -849,6 +854,7 @@ export default async function handler(req, res) {
       // "GDLP-W###-####"/numérico), lo que permite transferencias web↔app.
       const toAcc = findAccountByIbanOrId(state, to);
       if (!toAcc) return json(res, 404, { error: "Cuenta destino no encontrada. Revisa el IBAN." });
+      if (esJunior(fromAcc)) return json(res, 403, { error: "Las transferencias Junior deben autorizarse desde la cuenta tutora." });
       if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
         return json(res, 400, { error: "No puedes transferir a la misma cuenta" });
       }
@@ -856,9 +862,29 @@ export default async function handler(req, res) {
       if (!Number.isFinite(amount) || amount <= 0) {
         return json(res, 400, { error: "Cantidad inválida" });
       }
+
+      const requestHash = crypto.createHash("sha256").update(JSON.stringify({
+        dip: dipNormalizadoDe(req.placetaIdUser), from, to: toAcc.id, amount,
+        concepto: String(concepto || "Transferencia").trim().slice(0, 120)
+      })).digest("hex");
+      const prior = (state.transactions || []).find((item) =>
+        item?.source === "banco-web-transferencia" && item?.idempotencyKey === idempotencyKey && item?.fromAccountId === from
+      );
+      if (prior) {
+        if (prior.requestHash !== requestHash) return json(res, 409, { error: "idempotency_key_payload_conflict" });
+        return json(res, 200, { ok: true, transferencia: {
+          id: prior.id, estado: prior.status, executionCode: prior.executionCode,
+          amountPz: prior.amountPz, from: prior.fromAccountId, to: prior.toAccountId,
+          mensaje: "Solicitud existente; no se ha duplicado. Confirma en PlacetaID Móvil."
+        } });
+      }
+
       if ((fromAcc.balancePz ?? 0) < amount) {
         return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: amount });
       }
+
+      const juniorCheck = validarTransferenciaJunior(state, fromAcc.id, toAcc.id, amount, new Date().toISOString().slice(0, 7));
+      if (!juniorCheck.ok) return json(res, 403, { error: juniorCheck.error, limite: juniorCheck.limite, acumulado: juniorCheck.acumulado });
 
       const now = new Date().toISOString();
       const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
@@ -881,7 +907,9 @@ export default async function handler(req, res) {
         status: "Pending",
         firmaRequerida: true,
         executionCode,
-        source: "banco-web",
+        source: "banco-web-transferencia",
+        idempotencyKey,
+        requestHash,
         createdAt: now,
         updatedAt: now,
         IBAN_Origin: fromAcc.iban || ""
@@ -920,8 +948,10 @@ export default async function handler(req, res) {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const account = owner.accounts.find((a) => a.id === body.from) || owner.accounts[0];
-      if (!account) return json(res, 404, { error: "cuenta_no_encontrada" });
+      const account = owner.accounts.find((a) => a.id === body.from);
+      if (!account) return json(res, 403, { error: "cuenta_no_autorizada" });
+      if (esJunior(account)) return json(res, 403, { error: "placezum_no_disponible_para_junior" });
+      if (!esCuentaPersonalViva(account)) return json(res, 403, { error: "placezum_solo_cuentas_personales" });
       const codigo = generatePlacezumCode(account);
       return json(res, 200, { ok: true, codigo });
     }
@@ -929,31 +959,53 @@ export default async function handler(req, res) {
     if (req.method === "POST" && path === "/api/web/placezum/pagar") {
       const body = JSON.parse((await readBody(req)) || "{}");
       const { from, codigo, cantidad, concepto } = body;
+      const idempotencyKey = String(req.headers["idempotency-key"] || "").trim();
+      if (!/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) {
+        return json(res, 400, { error: "idempotency_key_required" });
+      }
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
       const fromAcc = owner.accounts.find((a) => a.id === from);
       if (!fromAcc) return json(res, 403, { error: "No puedes pagar desde una cuenta que no es tuya" });
-      const toAcc = findAccountByPlacezumCode(state, codigo);
+      if (esJunior(fromAcc)) return json(res, 403, { error: "Las cuentas Junior requieren autorización del tutor para PlaceZum." });
+      const amount = Math.round(Number(cantidad));
+      if (!Number.isFinite(amount) || amount <= 0) return json(res, 400, { error: "Cantidad inválida" });
+      const requestHash = crypto.createHash("sha256").update(JSON.stringify({
+        dip: dipNormalizadoDe(req.placetaIdUser), from, codigo: String(codigo || "").replace(/\D/g, ""),
+        amount, concepto: String(concepto || "Pago PlaceZUM").trim().slice(0, 80)
+      })).digest("hex");
+      const prior = (state.transactions || []).find((item) =>
+        item?.source === "banco-web-placezum" && item?.idempotencyKey === idempotencyKey && item?.fromAccountId === from
+      );
+      if (prior) {
+        if (prior.requestHash !== requestHash) return json(res, 409, { error: "idempotency_key_payload_conflict" });
+        return json(res, 200, { ok: true, placezum: {
+          id: prior.id, estado: prior.status, executionCode: prior.executionCode,
+          amountPz: prior.amountPz, destinatario: prior.toAccountId,
+          mensaje: "Solicitud existente; no se ha duplicado."
+        } });
+      }
+      const cleanCode = String(codigo || "").replace(/\D/g, "");
+      if (cleanCode.length !== 5) return json(res, 400, { error: "codigo_placezum_invalido" });
+      const toAcc = findAccountByPlacezumCode(state, cleanCode);
       if (!toAcc) return json(res, 404, { error: "Código PlaceZUM no localizado o caducado" });
       if (normalizeIban(toAcc.id) === normalizeIban(fromAcc.id) || normalizeIban(toAcc.iban) === normalizeIban(fromAcc.iban)) {
         return json(res, 400, { error: "No puedes pagarte a ti mismo" });
       }
-      const amount = Math.round(Number(cantidad));
-      if (!Number.isFinite(amount) || amount <= 0) return json(res, 400, { error: "Cantidad inválida" });
       if ((fromAcc.balancePz ?? 0) < amount) {
         return json(res, 400, { error: "Saldo insuficiente", saldo: fromAcc.balancePz ?? 0, requerido: amount });
       }
-
-      const cleanCode = String(codigo || "").replace(/\D/g, "");
+      const juniorCheck = validarTransferenciaJunior(state, fromAcc.id, toAcc.id, amount, new Date().toISOString().slice(0, 7));
+      if (!juniorCheck.ok) return json(res, 403, { error: juniorCheck.error, limite: juniorCheck.limite, acumulado: juniorCheck.acumulado });
       const now = new Date().toISOString();
       const pendingId = `txw-${crypto.randomBytes(8).toString("hex")}`;
       const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
       await upsertEntity("bank_transactions", pendingId, {
         id: pendingId, kind: "Placezum", fromAccountId: from, toAccountId: toAcc.id,
         amountPz: amount, ivaPz: 0, netAmount: amount, taxAmount: 0,
-        concept: `${concepto || "Pago PlaceZUM"} · Código ${cleanCode}`, status: "Pending",
-        firmaRequerida: true, executionCode, source: "banco-web",
+        concept: `${String(concepto || "Pago PlaceZUM").trim().slice(0, 80)} · Código ${cleanCode}`, status: "Pending",
+        firmaRequerida: true, executionCode, source: "banco-web-placezum", idempotencyKey, requestHash,
         createdAt: now, updatedAt: now, IBAN_Origin: fromAcc.iban || ""
       });
       return json(res, 201, {
