@@ -8,11 +8,12 @@
  */
 import { json, methodNotAllowed, readBody } from "../lib/http.js";
 import { assertPlacetaIdBearer } from "../lib/security.js";
-import { readBankState, upsertEntity } from "../lib/bankCollections.js";
+import { readBankState, writeBankState, upsertEntity } from "../lib/bankCollections.js";
 import { buscarTitularPorDip, esCuentaPersonalViva, esDipValido, registrarTitularPorPlacetaId } from "../lib/registroPlacetaId.js";
 import * as N from "../lib/nominas.js";
 import * as T from "../lib/tributos.js";
 import crypto from "crypto";
+import { assertInvestmentAmount, calculateInvestmentResult, activeInvestments, investmentLimits, normalizeRisk } from "../lib/inversiones60.js";
 
 const CENSUS_REQUIRED_ACTION = "censo pendiente";
 
@@ -545,21 +546,62 @@ export default async function handler(req, res) {
       return json(res, 200, { declaraciones, empresas, estimacion: { periodo: new Date().toISOString().slice(0, 7), patrimonioMedio: Number(patrimonioMedio.toFixed(2)), ingresos: Number(ingresos.toFixed(2)), pagos: Number(pagos.toFixed(2)), indiceAcumulacionPct: Number((ia * 100).toFixed(2)), cuotaIrm, cuotaIgf, ivaRepercutido, ivaDeclarado: scopedIsBusiness && Boolean(scopedAccounts[0]?.declaraIva), total: Number((cuotaIrm + cuotaIgf + (scopedAccounts[0]?.declaraIva ? ivaRepercutido : 0)).toFixed(2)), fuente: "movimientos y saldos bancarios reales" } });
     }
 
-    // Cartera de inversiones del titular (holdings y operaciones).
+    // Historial laboral IAL: el trabajador ve su RA completo; una entidad
+    // solo recibe su propio RV y relaciones que administra.
+    if (req.method === "GET" && path === "/api/web/ial") {
+      const dip = dipNormalizadoDe(req.placetaIdUser);
+      const propia = owner.accounts.find((account) => account.type === "Business" && account.eip);
+      const employee = await N.estadoIAL({ employeeDip: dip });
+      const company = propia ? await N.estadoIAL({ companyAccountId: propia.id }) : null;
+      return json(res, 200, {
+        ra: employee,
+        rv: company ? { operaciones: company.operaciones, relaciones: company.relaciones, actualizaciones: company.rv, resumen: company.resumen } : null,
+        privacidad: { trabajador: "completo", entidad: "limitado_a_sus_relaciones", fuente: "Tributos/IAL" }
+      });
+    }
+
+    // Inversión 60s: el backend es la fuente autoritativa del resultado.
+    if (path === "/api/web/inversiones" && req.method === "POST") {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      return json(res, 201, await iniciarInversion60(state, owner, req.placetaIdUser, body));
+    }
+
+    if (path.startsWith("/api/web/inversiones/") && req.method === "POST" && path.endsWith("/liquidar")) {
+      const investmentId = decodeURIComponent(path.slice("/api/web/inversiones/".length, -"/liquidar".length));
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      return json(res, 200, await liquidarInversion60(state, owner, investmentId));
+    }
+
     if (req.method === "GET" && path === "/api/web/inversiones") {
       const state = await readBankState();
       const owner = resolveOwner(state, req.placetaIdUser.dip);
       if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
-      const cuentas = cuentasActivas(owner, url);
+      const updatedState = await liquidarVencidasParaOwner(state, owner);
+      const cuentas = cuentasActivas(owner, url).map((account) => updatedState.accounts.find((item) => item.id === account.id) || account);
       const permitidas = cuentas.filter((account) => {
         const tipo = String(account.type || account.kind || "").toLowerCase();
         return ["investment", "inversion", "business", "empresa"].includes(tipo) || Boolean(account.eip);
       });
-      if (!permitidas.length) return json(res, 200, { holdings: [], operaciones: [], disponible: false, motivo: "solo_cuentas_inversion_o_empresa" });
+      if (!permitidas.length) return json(res, 200, { holdings: [], operaciones: [], entidades: [], disponible: false, motivo: "solo_cuentas_inversion_o_empresa" });
       const accountIds = new Set(permitidas.map((a) => a.id));
-      const holdings = (state.investmentHoldings || []).filter((h) => h && accountIds.has(h.accountId));
-      const operaciones = (state.investmentOperations || []).filter((o) => o && accountIds.has(o.accountId));
-      return json(res, 200, { holdings, operaciones, disponible: true });
+      const holdings = (updatedState.investmentHoldings || []).filter((h) => h && accountIds.has(h.accountId));
+      const operaciones = (updatedState.investmentOperations || []).filter((o) => o && accountIds.has(o.accountId));
+      const active = activeInvestments(updatedState.investmentOperations || []);
+      const entidades = (updatedState.accounts || [])
+        .filter((account) => account.type === "Business" && account.listedInvestmentFund && !account.closedAt)
+        .map((entity) => {
+          const entityActive = active.filter((operation) => operation.entityId === entity.id || operation.companyId === entity.id);
+          const capacityPz = Number(entity.investmentCapacityPz || entity.fundCapacityPz || 100000);
+          const investedPz = entityActive.reduce((sum, operation) => sum + Number(operation.amountPz || 0), 0);
+          const riskLevel = normalizeRisk(entity.investmentRiskLevel);
+          return { id: entity.id, eip: entity.eip || null, nombre: entity.displayName || entity.id, riskLevel, capacidadPz: capacityPz, invertidoPz: investedPz, disponiblePz: Math.max(0, capacityPz - investedPz), inversores: new Set(entityActive.map((operation) => operation.accountId)).size, operacionesLiquidadas: (updatedState.investmentOperations || []).filter((operation) => operation.entityId === entity.id && operation.settledAt).length, cumplimiento: entity.complianceStatus || "Clear" };
+        });
+      return json(res, 200, { holdings, operaciones, entidades, disponible: true, duracionSegundos: 60, limites: { porcentajeSaldo: 25, porEntidadPz: 5000, globalActivoPz: 10000 } });
     }
 
     // Subvenciones del titular (solicitudes recibidas por sus cuentas).
@@ -591,6 +633,7 @@ export default async function handler(req, res) {
         return json(res, 404, { error: "movimiento_no_encontrado" });
       }
       const accounts = new Map((state.accounts || []).map((account) => [account.id, account]));
+      const ledgerEntry = (state.ledgerEntries || []).find((entry) => entry.operationId === transaction.id);
       return json(res, 200, {
         movimiento: {
           id: transaction.id,
@@ -599,6 +642,12 @@ export default async function handler(req, res) {
           amountPz: transaction.amountPz ?? transaction.netAmount ?? 0,
           ivaPz: transaction.ivaPz ?? 0,
           concept: descriptiveConcept(transaction, accounts),
+          kind: transaction.kind || "Unknown",
+          reference: transaction.reference || transaction.referenceId || transaction.id,
+          authorizedBy: transaction.authorizedBy || transaction.actor || transaction.createdBy || "system",
+          source: transaction.source || "bank",
+          ledgerHash: ledgerEntry?.hash || null,
+          previousHash: ledgerEntry?.previousHash || null,
           status: transaction.status || "Settled",
           createdAt: transaction.createdAt || null,
           esEntrada: accountIds.has(transaction.toAccountId)
@@ -613,6 +662,7 @@ export default async function handler(req, res) {
       const limit = Math.min(Math.max(Number(url.searchParams.get("limit")) || 100, 1), 500);
       const accountIds = new Set(owner.accounts.map((a) => a.id));
       const accounts = new Map((state.accounts || []).map((account) => [account.id, account]));
+      const ledger = new Map((state.ledgerEntries || []).map((entry) => [entry.operationId, entry]));
       const cuenta = url.searchParams.get("cuenta") || "";
       const cuentaValida = !!cuenta && accountIds.has(cuenta);
       const movs = (state.transactions || [])
@@ -627,6 +677,12 @@ export default async function handler(req, res) {
           amountPz: t.amountPz ?? t.netAmount ?? 0,
           ivaPz: t.ivaPz ?? 0,
           concept: descriptiveConcept(t, accounts),
+          kind: t.kind || "Unknown",
+          reference: t.reference || t.referenceId || t.id,
+          authorizedBy: t.authorizedBy || t.actor || t.createdBy || "system",
+          source: t.source || "bank",
+          ledgerHash: ledger.get(t.id)?.hash || null,
+          previousHash: ledger.get(t.id)?.previousHash || null,
           status: t.status || "Settled",
           createdAt: t.createdAt || null,
           esEntrada: cuentaValida ? t.toAccountId === cuenta : accountIds.has(t.toAccountId)
@@ -819,6 +875,9 @@ export default async function handler(req, res) {
         netAmount: amount,
         taxAmount: 0,
         concept: concepto || "Transferencia web (pendiente de firma)",
+        reference: pendingId,
+        authorizedBy: req.placetaIdUser.dip,
+        actor: req.placetaIdUser.dip,
         status: "Pending",
         firmaRequerida: true,
         executionCode,
@@ -1062,4 +1121,126 @@ export default async function handler(req, res) {
     console.error("[web.js]", error);
     return json(res, 500, { error: "internal_error" });
   }
+}
+
+async function iniciarInversion60(state, owner, identity, payload = {}) {
+  const accountId = String(payload.accountId || payload.cuenta || "").trim();
+  const account = (state.accounts || []).find((item) => item.id === accountId && owner.accounts.some((owned) => owned.id === item.id));
+  if (!account) throw new Error("investment_account_not_owned");
+  const accountType = String(account.type || account.kind || "").toLowerCase();
+  if (!["investment", "inversion", "business", "empresa"].includes(accountType)) throw new Error("investment_account_type_not_allowed");
+  const age = Number(identity?.edad ?? identity?.verifiedAge ?? owner.user?.verifiedAge ?? owner.user?.age);
+  if (!Number.isFinite(age) || age < 18) throw new Error("investment_age_required");
+
+  const entityId = String(payload.entityId || payload.companyId || "").trim();
+  const entity = (state.accounts || []).find((item) => item.id === entityId && item.type === "Business" && item.listedInvestmentFund && !item.closedAt);
+  if (!entity) throw new Error("investment_entity_not_available");
+  const active = activeInvestments(state.investmentOperations || []);
+  const entityActivePz = active.filter((item) => item.entityId === entity.id || item.companyId === entity.id).reduce((sum, item) => sum + Number(item.amountPz || 0), 0);
+  const capacityPz = Number(entity.investmentCapacityPz || entity.fundCapacityPz || 100000);
+  if (entityActivePz >= capacityPz) throw new Error("investment_entity_capacity_reached");
+  const { amount, limits } = assertInvestmentAmount({ amountPz: payload.amountPz ?? payload.amount, balancePz: account.balancePz, operations: state.investmentOperations || [], entityId: entity.id });
+  if (amount > capacityPz - entityActivePz) throw new Error(`investment_entity_capacity:${Math.max(0, capacityPz - entityActivePz)}`);
+
+  const now = new Date();
+  const id = `INV-${now.getUTCFullYear()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+  const createdAt = now.toISOString();
+  const liquidateAt = new Date(now.getTime() + 60_000).toISOString();
+  const result = calculateInvestmentResult({ id, entity, riskLevel: entity.investmentRiskLevel, createdAt });
+  const fund = (state.accounts || []).find((item) => item.id === "FUND-BLP" || item.kind === "FONDO_APOYO") || entity;
+  const buyId = `${id}-BUY`;
+  const operation = {
+    id: `op-${buyId}`,
+    investmentId: id,
+    accountId: account.id,
+    companyId: fund.id,
+    entityId: entity.id,
+    assetName: entity.displayName || entity.id,
+    amountPz: amount,
+    status: "ACTIVE",
+    createdAt,
+    liquidateAt,
+    readyAt: liquidateAt,
+    seedHash: result.seedHash,
+    riskLevel: result.riskLevel,
+    riskLabel: result.riskLabel,
+    entityComponentPct: result.entityComponentPct,
+    marketComponentPct: result.marketComponentPct,
+    randomComponentPct: result.randomComponentPct,
+    resultRatePct: result.resultRatePct,
+    maxReturnPct: 20,
+    limits
+  };
+  state.investmentOperations = [...(state.investmentOperations || []), operation];
+  state.transactions = [...(state.transactions || []), {
+    id: buyId,
+    kind: "InvestmentBuy",
+    fromAccountId: account.id,
+    toAccountId: fund.id,
+    amountPz: amount,
+    netAmount: amount,
+    ivaPz: 0,
+    taxAmount: 0,
+    concept: `Inversión 60s · ${entity.displayName || entity.id}`,
+    reference: id,
+    authorizedBy: identity?.dip || owner.user?.dip || "PlacetaID",
+    actor: identity?.dip || owner.user?.dip || "PlacetaID",
+    source: "investment-60s",
+    status: "Settled",
+    createdAt,
+    investmentId: id,
+    riskLevel: result.riskLevel,
+    seedHash: result.seedHash
+  }];
+  await writeBankState(state);
+  return { ok: true, inversion: operation, bloqueadoPz: amount, liquidacionAt: liquidateAt };
+}
+
+async function liquidarVencidasParaOwner(state, owner) {
+  let current = state;
+  const accountIds = new Set(owner.accounts.map((account) => account.id));
+  const due = activeInvestments(current.investmentOperations || []).filter((operation) => accountIds.has(operation.accountId) && Date.parse(operation.liquidateAt || "") <= Date.now());
+  for (const operation of due) {
+    await liquidarInversion60(current, owner, operation.investmentId || operation.id);
+    current = await readBankState();
+  }
+  return current;
+}
+
+async function liquidarInversion60(state, owner, investmentId) {
+  const accountIds = new Set(owner.accounts.map((account) => account.id));
+  const operation = (state.investmentOperations || []).find((item) => (item.investmentId === investmentId || item.id === investmentId) && accountIds.has(item.accountId));
+  if (!operation) throw new Error("investment_not_found");
+  if (operation.settledAt || operation.status === "SETTLED") return { ok: true, idempotent: true, inversion: operation };
+  if (Date.parse(operation.liquidateAt || "") > Date.now()) return { ok: false, status: "ACTIVE", remainingSeconds: Math.ceil((Date.parse(operation.liquidateAt) - Date.now()) / 1000), inversion: operation };
+  const payout = Math.max(0, Math.round(Number(operation.amountPz || 0) * (1 + Number(operation.resultRatePct || 0) / 100)));
+  const now = new Date().toISOString();
+  const sellId = `${operation.investmentId || operation.id}-SELL`;
+  const already = (state.transactions || []).find((transaction) => transaction.id === sellId);
+  if (already) return { ok: true, idempotent: true, inversion: operation };
+  const updatedOperation = { ...operation, status: "SETTLED", settledAt: now, payoutPz: payout, resultPz: payout - Number(operation.amountPz || 0), settlementTransactionId: sellId };
+  state.investmentOperations = (state.investmentOperations || []).map((item) => item.id === operation.id ? updatedOperation : item);
+  state.transactions = [...(state.transactions || []), {
+    id: sellId,
+    kind: "InvestmentSell",
+    fromAccountId: operation.companyId,
+    toAccountId: operation.accountId,
+    amountPz: payout,
+    netAmount: payout,
+    ivaPz: 0,
+    taxAmount: 0,
+    concept: `Liquidación Inversión 60s · ${operation.assetName || operation.entityId}`,
+    reference: operation.investmentId || operation.id,
+    authorizedBy: "Banco de La Placeta",
+    actor: "Banco de La Placeta",
+    source: "investment-60s",
+    status: "Settled",
+    createdAt: now,
+    originalTransactionId: `${operation.investmentId}-BUY`,
+    investmentId: operation.investmentId || operation.id,
+    resultRatePct: operation.resultRatePct,
+    seedHash: operation.seedHash
+  }];
+  await writeBankState(state);
+  return { ok: true, inversion: updatedOperation, capitalPz: operation.amountPz, resultadoPz: payout - Number(operation.amountPz || 0), totalRecibidoPz: payout };
 }

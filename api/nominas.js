@@ -4,7 +4,7 @@
    Autenticación: X-CRM-Key (servidor a servidor). La web de empresa y el
    panel RSP llaman aquí desde su backend, nunca desde el navegador.
 
-   GET  /api/nominas?action=estado|config|contratos|periodos|procesar
+   GET  /api/nominas?action=estado|config|contratos|periodos|ial|procesar
    POST /api/nominas  { action, ... }
      · config-guardar      { cutoffDay?, autoPago?, retencionPct?, activo? }
      · contrato-guardar    { id?, companyAccountId, employeeDip, grossSalaryPz, complementos[] }
@@ -57,6 +57,7 @@ export default async function handler(req, res) {
       if (action === "config") return json(res, 200, await N.leerConfig());
       if (action === "contratos") return json(res, 200, await N.listarContratos(filtrosDe(url.searchParams)));
       if (action === "periodos") return json(res, 200, await N.listarPeriodos(filtrosDe(url.searchParams)));
+      if (action === "ial") return json(res, 200, await N.estadoIAL(filtrosDe(url.searchParams)));
       if (action === "procesar") return json(res, 200, await N.procesarVencimientos(new Date(), { autor: "cron-get" }));
       return json(res, 400, { error: "action_desconocida", action });
     }
@@ -68,6 +69,7 @@ export default async function handler(req, res) {
     const action = body.action;
 
     if (action === "estado") return json(res, 200, await N.estadoNominas(filtrosDe(new URLSearchParams(body.filtros || {}))));
+    if (action === "ial") return json(res, 200, await N.estadoIAL(filtrosDe(new URLSearchParams(body.filtros || {}))));
 
     if (action === "config") {
       return json(res, 200, body.guardar ? await N.guardarConfig(body) : await N.leerConfig());
@@ -137,7 +139,7 @@ export default async function handler(req, res) {
     return json(res, 400, {
       error: "action_desconocida",
       action,
-      disponibles: ["estado", "config", "contrato-guardar", "contrato-borrar", "confirmar", "confirmar-lote", "cerrar", "pagar", "procesar"]
+      disponibles: ["estado", "config", "contratos", "periodos", "ial", "contrato-guardar", "contrato-borrar", "confirmar", "confirmar-lote", "cerrar", "pagar", "procesar"]
     });
   } catch (e) {
     return json(res, 400, { error: e.message });

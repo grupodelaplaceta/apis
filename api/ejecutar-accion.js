@@ -191,11 +191,39 @@ async function ejecutarContratarProducto(state, data) {
   const account = state.accounts?.find(a => a.id === accountId);
   if (!account) throw new Error(`Cuenta ${accountId} no encontrada`);
 
-  account.products = [...(account.products || []), {
+  const productos = account.products || [];
+  const contratado = productos.find((product) => product.type === productType && product.status === 'active');
+  if (contratado) {
+    const tarjeta = (state.digitalCards || []).find((card) => card.accountId === accountId && card.productType === productType);
+    return { accountId, productType, status: 'active', idempotente: true, card: tarjeta || null };
+  }
+
+  account.products = [...productos, {
     type: productType,
     contractedAt: new Date().toISOString(),
-    status: 'active'
+    status: 'active',
+    signedBy: data.firmadoPor || null
   }];
+
+  if (productType === 'placetapay-debito') {
+    state.digitalCards = state.digitalCards || [];
+    const existente = state.digitalCards.find((card) => card.accountId === accountId && card.productType === productType);
+    if (existente) return { accountId, productType, status: 'active', idempotente: true, card: existente };
+    const card = {
+      id: `card-${accountId}-${Date.now()}`,
+      accountId,
+      productType,
+      alias: 'PlacetaPay Débito',
+      tier: 'PlacetaPay',
+      cardNumber: `5487${crypto.randomBytes(6).toString('hex').replace(/\D/g, '').padEnd(12, '7').slice(0, 12)}`,
+      frozen: false,
+      released: true,
+      issuedAt: new Date().toISOString(),
+      issuedBy: `firma:${data.firmadoPor || 'sistema'}`
+    };
+    state.digitalCards.push(card);
+    return { accountId, productType, status: 'active', card };
+  }
 
   return { accountId, productType, status: 'active' };
 }

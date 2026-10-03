@@ -124,5 +124,14 @@ console.log("8) Un impuesto ya guardado sobre una transferencia cancelada se rev
   check("se registra la reversión", out.auditLogs.some((x) => x.action === "reverted_orphaned_transaction"), JSON.stringify(out.auditLogs));
 }
 
+console.log("9) Ledger auditable con hash encadenado:");
+{
+  const tx = { id: "tx-ledger", kind: "Transfer", fromAccountId: "a", toAccountId: "b", amountPz: 10, status: "Settled", concept: "Apoyo actividad", reference: "REF-1", authorizedBy: "12345678Z", createdAt: NOW };
+  const out = reconcileIncomingState({ accounts: [A, B, TGLP], transactions: [], auditLogs: [], ledgerEntries: [] }, { accounts: [A, B, TGLP], transactions: [tx], auditLogs: [], ledgerEntries: [] }, NOW);
+  const entry = out.ledgerEntries.find((item) => item.operationId === tx.id);
+  check("registra la operación en ledger", entry?.amountPz === 10 && entry?.reference === "REF-1", JSON.stringify(entry));
+  check("conserva actor y hash", entry?.authorizedBy === "12345678Z" && entry?.hash && entry?.previousHash === "GENESIS", JSON.stringify(entry));
+}
+
 console.log(`\nResultado: ${pass} OK, ${fail} FAIL`);
 process.exit(fail ? 1 : 0);

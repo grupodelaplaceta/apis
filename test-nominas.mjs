@@ -7,8 +7,8 @@
 
 import {
   periodoDe, periodoAnterior, fechaLimite, plazoVencido, esPeriodoValido,
-  complementoMensualPz, calcularNomina, normalizarContrato, idPeriodo,
-  CONFIG_POR_DEFECTO
+  complementoMensualPz, calcularNomina, calcularIAL, salarioMinimoContrato, normalizarContrato, idPeriodo,
+  CONFIG_POR_DEFECTO, SMI_MENSUAL_PZ
 } from "./lib/nominas.js";
 
 let ok = 0;
@@ -89,6 +89,21 @@ eq(confirmada.lineas.filter((l) => l.estado === "confirmada").length, 1, "la act
 const sinRetencion = calcularNomina(contrato, {}, { ...cfg, retencionPct: 0 });
 aprox(sinRetencion.retencionesPz, 0, "sin retención no hay descuento");
 aprox(sinRetencion.netoPz, 1170, "neto = bruto si la retención es 0");
+
+console.log("\n── SMI ───────────────────────────────────────────────────────");
+eq(SMI_MENSUAL_PZ, 150, "SMI mensual vigente");
+aprox(salarioMinimoContrato({ workloadPct: 100 }), 150, "mínimo jornada completa");
+aprox(salarioMinimoContrato({ workloadPct: 50 }), 75, "mínimo jornada parcial 50%");
+
+console.log("\n── IAL 24 % ──────────────────────────────────────────────────");
+const ial = calcularIAL(1000);
+aprox(ial.totalPz, 240, "IAL total sobre salario de 1000");
+aprox(ial.empleador.totalPz, 120, "IAL empleador");
+aprox(ial.empleador.valorizacionPz, 60, "empleador → RV");
+aprox(ial.empleador.bancoPz, 60, "empleador → Banco");
+aprox(ial.trabajador.totalPz, 120, "IAL trabajador");
+aprox(ial.trabajador.antiguedadPz, 60, "trabajador → RA");
+aprox(ial.trabajador.bancoPz, 60, "trabajador → Banco");
 
 console.log("\n── Contrato mínimo ───────────────────────────────────────────");
 const minimo = normalizarContrato({ id: "pc-2", companyAccountId: "e", employeeDip: "x", grossSalaryPz: 0 });
