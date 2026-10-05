@@ -35,6 +35,10 @@ function filtrosDe(params) {
   };
 }
 
+export function leerEstadoNominas(filtro, consultar = N.estadoNominas) {
+  return consultar(filtro, { skipAutoProcess: true });
+}
+
 export default async function handler(req, res) {
   try {
     if (req.method === "OPTIONS") {
@@ -53,7 +57,7 @@ export default async function handler(req, res) {
     /* ── GET: consultas y procesado perezoso ─────────────────────────── */
     if (req.method === "GET") {
       const action = url.searchParams.get("action") || "estado";
-      if (action === "estado") return json(res, 200, await N.estadoNominas(filtrosDe(url.searchParams)));
+      if (action === "estado") return json(res, 200, await leerEstadoNominas(filtrosDe(url.searchParams)));
       if (action === "config") return json(res, 200, await N.leerConfig());
       if (action === "contratos") return json(res, 200, await N.listarContratos(filtrosDe(url.searchParams)));
       if (action === "periodos") return json(res, 200, await N.listarPeriodos(filtrosDe(url.searchParams)));
@@ -68,7 +72,7 @@ export default async function handler(req, res) {
     const body = JSON.parse((await readBody(req)) || "{}");
     const action = body.action;
 
-    if (action === "estado") return json(res, 200, await N.estadoNominas(filtrosDe(new URLSearchParams(body.filtros || {}))));
+    if (action === "estado") return json(res, 200, await leerEstadoNominas(filtrosDe(new URLSearchParams(body.filtros || {}))));
     if (action === "ial") return json(res, 200, await N.estadoIAL(filtrosDe(new URLSearchParams(body.filtros || {}))));
 
     if (action === "config") {

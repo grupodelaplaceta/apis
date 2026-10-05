@@ -10,6 +10,7 @@ import {
   complementoMensualPz, calcularNomina, calcularIAL, salarioMinimoContrato, normalizarContrato, idPeriodo,
   CONFIG_POR_DEFECTO, SMI_MENSUAL_PZ
 } from "./lib/nominas.js";
+import { leerEstadoNominas } from "./api/nominas.js";
 
 let ok = 0;
 let fail = 0;
@@ -26,6 +27,20 @@ function aprox(a, b, label) {
 }
 
 console.log("\n── Fechas y periodos ──────────────────────────────────────────");
+let filtrosConsultados;
+let opcionesConsulta;
+const estadoDePrueba = { periodos: [] };
+const estadoConsultado = await leerEstadoNominas(
+  { employeeDip: "12345678Z" },
+  async (filtros, opciones) => {
+    filtrosConsultados = filtros;
+    opcionesConsulta = opciones;
+    return estadoDePrueba;
+  }
+);
+check(estadoConsultado === estadoDePrueba, "estado nóminas devuelve el resultado de la consulta");
+eq(filtrosConsultados, { employeeDip: "12345678Z" }, "estado conserva filtros del usuario");
+eq(opcionesConsulta, { skipAutoProcess: true }, "estado de lectura omite el procesamiento automático");
 eq(periodoDe(new Date("2026-09-13T10:00:00Z")), "2026-09", "periodoDe septiembre 2026");
 eq(periodoDe(new Date("2026-01-01T00:00:00Z")), "2026-01", "periodoDe enero");
 eq(periodoAnterior("2026-09"), "2026-08", "periodoAnterior de 2026-09");
