@@ -38,12 +38,6 @@ export default async function handler(req, res) {
       if (!link) {
         return json(res, 404, { error: "payment_link_not_found", developerCode: "BPL-PAY-VER-003" });
       }
-      if (link.status !== "Pending") {
-        return json(res, 400, {
-          error: "payment_link_already_processed", developerCode: "BPL-PAY-VER-004",
-          message: "Este enlace de pago ya ha sido procesado."
-        });
-      }
       const secret = config.appSecrets()[0] || "gdlp-secure-payment-key";
       const sigPayload = [link.id, link.kind, link.creatorAccountId, link.amountPz, link.ivaPz, link.totalPz].join(":");
       const expected = crypto.createHmac("sha256", secret).update(sigPayload, "utf8").digest("hex");
@@ -54,6 +48,9 @@ export default async function handler(req, res) {
           error: "invalid_signature_link_tampered", developerCode: "BPL-PAY-VER-005",
           message: "Este enlace de pago no es válido o ha sido manipulado."
         });
+      }
+      if (link.status !== "Pending" && link.status !== "Processed") {
+        return json(res, 409, { error: "payment_link_unavailable", message: "Este enlace no está disponible para el pago." });
       }
       return json(res, 200, {
         ok: true,

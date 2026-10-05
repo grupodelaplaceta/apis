@@ -12,6 +12,7 @@ import { readBankState, writeBankState, upsertEntity } from "../lib/bankCollecti
 import { buscarTitularPorDip, esCuentaPersonalViva, esDipValido, registrarTitularPorPlacetaId } from "../lib/registroPlacetaId.js";
 import * as N from "../lib/nominas.js";
 import * as T from "../lib/tributos.js";
+import { config } from "../lib/config.js";
 import crypto from "crypto";
 import { assertInvestmentAmount, calculateInvestmentResult, activeInvestments, investmentLimits, normalizeRisk } from "../lib/inversiones60.js";
 import { esJunior, validarTransferenciaJunior } from "../lib/limite-junior.js";
@@ -1019,6 +1020,68 @@ export default async function handler(req, res) {
           mensaje: `Pago PlaceZUM de ${amount} Pz registrado. Confírmalo en PlacetaID Móvil para ejecutarlo.`
         }
       });
+    }
+
+    const paymentLinkPayMatch = path.match(/^\/api\/web\/payment-links\/([^/]+)\/pagar$/);
+    if (req.method === "POST" && paymentLinkPayMatch) {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const id = decodeURIComponent(paymentLinkPayMatch[1]);
+      const signature = String(body.signature || "").trim();
+      const accountId = String(body.accountId || "").trim();
+      const idempotencyKey = String(req.headers["idempotency-key"] || "").trim();
+      if (!/^[A-Za-z0-9._:-]{16,128}$/.test(idempotencyKey)) return json(res, 400, { error: "idempotency_key_required" });
+      const state = await readBankState();
+      const owner = resolveOwner(state, req.placetaIdUser.dip);
+      if (!owner) return json(res, 404, { error: "titular_no_encontrado" });
+      const account = owner.accounts.find((item) => item.id === accountId);
+      if (!account || !esCuentaPersonalViva(account)) return json(res, 403, { error: "cuenta_de_pago_no_autorizada" });
+      if (esJunior(account)) return json(res, 403, { error: "pago_por_enlace_no_disponible_para_junior" });
+      const link = (state.paymentLinks || []).find((item) => item.id === id);
+      if (!link) return json(res, 404, { error: "payment_link_not_found" });
+      const secret = config.appSecrets()[0];
+      const sigPayload = [link.id, link.kind, link.creatorAccountId, link.amountPz, link.ivaPz, link.totalPz].join(":");
+      const expected = crypto.createHmac("sha256", secret).update(sigPayload, "utf8").digest("hex");
+      const provided = Buffer.from(signature, "hex");
+      const expectedBuffer = Buffer.from(expected, "hex");
+      if (provided.length !== expectedBuffer.length || !crypto.timingSafeEqual(provided, expectedBuffer)) {
+        return json(res, 403, { error: "invalid_signature_link_tampered" });
+      }
+      if (link.kind !== "Payment") return json(res, 400, { error: "payment_link_not_payable" });
+      if (link.status !== "Pending") return json(res, 409, { error: "payment_link_already_processed" });
+      const recipient = (state.accounts || []).find((item) => item.id === link.creatorAccountId);
+      if (!recipient || (link.targetIban && normalizeIban(recipient.iban) !== normalizeIban(link.targetIban))) {
+        return json(res, 409, { error: "payment_link_recipient_unavailable" });
+      }
+      const prior = (state.transactions || []).find((item) => item?.source === "payment-link" && item?.originalTransactionId === link.id);
+      if (prior) {
+        if (prior.fromAccountId !== account.id) return json(res, 409, { error: "payment_link_payment_in_progress" });
+        return json(res, 200, { ok: true, payment: {
+          id: prior.id, status: prior.status, executionCode: prior.executionCode,
+          amountPz: prior.amountPz, ivaPz: prior.ivaPz || 0,
+          message: prior.status === "Settled" ? "Pago confirmado." : "Solicitud existente; confirma la operación en PlacetaID."
+        } });
+      }
+      const totalDebit = Number(link.amountPz || 0) + Number(link.ivaPz || 0);
+      if (!Number.isSafeInteger(totalDebit) || totalDebit <= 0) return json(res, 400, { error: "invalid_payment_link_amount" });
+      if (Number(account.balancePz || 0) < totalDebit) return json(res, 400, { error: "saldo_insuficiente" });
+      const requestHash = crypto.createHash("sha256").update(JSON.stringify({
+        dip: dipNormalizadoDe(req.placetaIdUser), linkId: id, accountId, signature
+      })).digest("hex");
+      const transactionId = `txpl-${crypto.randomBytes(9).toString("hex")}`;
+      const executionCode = `GDLP-${crypto.randomBytes(4).toString("hex").toUpperCase()}-${crypto.randomInt(1000, 9999)}`;
+      await upsertEntity("bank_transactions", transactionId, {
+        id: transactionId, kind: "Consumption", fromAccountId: account.id, toAccountId: recipient.id,
+        amountPz: Number(link.amountPz), netAmount: Number(link.amountPz), ivaPz: Number(link.ivaPz || 0), taxAmount: Number(link.ivaPz || 0),
+        concept: "PAYMENT_LINK", reference: link.id, originalTransactionId: link.id,
+        status: "Pending", firmaRequerida: true, executionCode, source: "payment-link",
+        idempotencyKey, requestHash, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        IBAN_Origin: account.iban || ""
+      });
+      return json(res, 201, { ok: true, payment: {
+        id: transactionId, status: "Pending", executionCode,
+        amountPz: Number(link.amountPz), ivaPz: Number(link.ivaPz || 0),
+        message: "Solicitud registrada. El saldo no se carga hasta firmar en PlacetaID."
+      } });
     }
 
     // ── Facturación: facturas del mes de TUS empresas + IVA pendiente ──
